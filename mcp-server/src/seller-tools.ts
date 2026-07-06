@@ -907,11 +907,11 @@ export function registerSellerTools(
   server.registerTool('generate_payment_link', {
     title: 'Generate Payment Link',
     description:
-      'Generate a payment link for upgrading the seller\'s account. Send this link to the user — they tap it, pay in their browser, and come back. Two plans: "sale_pass" (Move Sale — $10, 50 items, 30 days) and "big_move" (Garage Sale — $29, 250 items, 60 days). Free tier: 3 items, always free (page expires every 30 days). Use check_tier_status first to see if an upgrade is needed.',
+      'Generate a payment link for upgrading the seller\'s account. Send this link to the user — they tap it, pay in their browser, and come back. Two plans: "sale_pass" (Move Sale — $20, 50 items, 30 days) and "big_move" (Garage Sale — $39, 250 items, 60 days). Free tier: 3 items, always free (page expires every 30 days). Use check_tier_status first to see if an upgrade is needed.',
     inputSchema: {
       plan: z
         .enum(['sale_pass', 'big_move'])
-        .describe('Plan to upgrade to: "sale_pass" ($10) or "big_move" ($29)'),
+        .describe('Plan to upgrade to: "sale_pass" ($20) or "big_move" ($39)'),
     },
     annotations: {
       title: 'Generate Payment Link',

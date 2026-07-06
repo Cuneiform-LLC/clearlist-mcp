@@ -1,5 +1,10 @@
 # ClearList MCP Server
 
+> This directory is a synced mirror of the `mcp-server/` folder in the
+> private `Cuneiform-LLC/Clearlist.me` monorepo, which is the source of
+> truth. Don't hand-edit files here — copy from the monorepo and commit.
+> This is what `npm publish` runs from and what Smithery/mcp.so point at.
+
 AI agent interface to the ClearList moving sale platform. Any MCP-compatible agent (Claude, ChatGPT, Gemini, Manus, custom agents) can create listings, publish sale pages, and manage reservations — all through the same API routes the web UI uses.
 
 **Users never need to visit clearlist.me.** The agent handles account creation, photo processing, listing generation, and publishing entirely through conversation.

@@ -1,10 +1,36 @@
 {
   "name": "@clearlist/mcp-server",
   "version": "0.3.0",
-  "private": true,
+  "private": false,
   "description": "ClearList MCP Server — AI agent interface to the ClearList API",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "clearlist-mcp-server": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "package.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Cuneiform-LLC/clearlist-mcp.git",
+    "directory": "mcp-server"
+  },
+  "homepage": "https://clearlist.me/developers",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "agents",
+    "clearlist"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
@@ -16,8 +42,8 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
-    "@types/node": "^25.9.1",
-    "tsx": "^4.22.3",
+    "@types/node": "^25.9.2",
+    "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   },
   "overrides": {
