@@ -121,7 +121,13 @@ export function registerOnboardingTools(
       }
     }
 
-    // Store the API key in the client for all subsequent requests
+    // Store the API key in the client for all subsequent requests. This is
+    // what makes the rest of a stdio session authenticated (one process, one
+    // client instance, mutated in place). The remote transport builds a
+    // fresh client per HTTP request, so that mutation alone doesn't carry
+    // forward there — the apiKey is also echoed below so the calling agent
+    // can capture it and resend it (as X-ClearList-API-Key or
+    // Authorization: Bearer) on subsequent tool calls in that conversation.
     if (data.apiKey) {
       api.setApiKey(data.apiKey)
     }
@@ -135,6 +141,7 @@ export function registerOnboardingTools(
             : `Signed in as ${email}. You can now manage their ClearList sale.`,
           is_new_user: data.isNewUser,
           authenticated: true,
+          apiKey: data.apiKey,
           available_tools: [
             'create_listing — Send photos to create an AI-generated listing',
             'bulk_create_listings — Send many photos at once (up to 50), AI groups and lists them all',

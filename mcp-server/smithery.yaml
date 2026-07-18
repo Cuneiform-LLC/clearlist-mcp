@@ -1,0 +1,37 @@
+# Smithery configuration for @clearlist/mcp-server (stdio / npm install path).
+#
+# This describes the LOCAL install method (npx the npm package). The HOSTED
+# remote endpoint (https://clearlist.me/api/mcp) is published separately with:
+#   smithery mcp publish https://clearlist.me/api/mcp -n clearlist/clearlist
+# and does not use this file.
+#
+# Docs: https://smithery.ai/docs
+startCommand:
+  type: stdio
+  # Fields Smithery prompts the user for at install time.
+  configSchema:
+    type: object
+    properties:
+      apiKey:
+        type: string
+        title: ClearList API Key
+        description: >-
+          Your ClearList API key (format cl_<64-hex>). Optional — leave blank
+          and the agent can acquire one at runtime via the email-verification
+          onboarding tools.
+      apiUrl:
+        type: string
+        title: API Base URL
+        description: Base URL of the ClearList API.
+        default: https://clearlist.me
+    required: []
+  # How Smithery launches the server with the collected config.
+  commandFunction: |-
+    (config) => ({
+      command: 'npx',
+      args: ['-y', '@clearlist/mcp-server'],
+      env: {
+        ...(config.apiKey ? { CLEARLIST_API_KEY: config.apiKey } : {}),
+        CLEARLIST_API_URL: config.apiUrl || 'https://clearlist.me'
+      }
+    })

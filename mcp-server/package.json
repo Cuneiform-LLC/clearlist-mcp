@@ -1,11 +1,13 @@
 {
   "name": "@clearlist/mcp-server",
-  "version": "0.3.0",
+  "version": "0.3.1",
+  "mcpName": "io.github.Cuneiform-LLC/clearlist",
   "private": false,
   "description": "ClearList MCP Server — AI agent interface to the ClearList API",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
+    "clearlist": "dist/cli.js",
     "clearlist-mcp-server": "dist/index.js"
   },
   "files": [
@@ -25,6 +27,7 @@
     "model-context-protocol",
     "ai",
     "agents",
+    "cli",
     "clearlist"
   ],
   "license": "MIT",
@@ -33,20 +36,20 @@
   },
   "scripts": {
     "build": "tsc",
-    "postbuild": "node -e \"try{require('fs').chmodSync('dist/index.js',0o755)}catch(e){}\"",
+    "postbuild": "node -e \"try{const{chmodSync}=require('fs');chmodSync('dist/index.js',0o755);chmodSync('dist/cli.js',0o755)}catch(e){}\"",
     "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "zod": "^3.23.8"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^25.9.2",
+    "@types/node": "^26.1.1",
     "tsx": "^4.22.4",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "overrides": {
     "fast-uri": ">=3.1.1",

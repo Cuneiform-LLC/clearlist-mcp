@@ -1,10 +1,5 @@
 # ClearList MCP Server
 
-> This directory is a synced mirror of the `mcp-server/` folder in the
-> private `Cuneiform-LLC/Clearlist.me` monorepo, which is the source of
-> truth. Don't hand-edit files here — copy from the monorepo and commit.
-> This is what `npm publish` runs from and what Smithery/mcp.so point at.
-
 AI agent interface to the ClearList moving sale platform. Any MCP-compatible agent (Claude, ChatGPT, Gemini, Manus, custom agents) can create listings, publish sale pages, and manage reservations — all through the same API routes the web UI uses.
 
 **Users never need to visit clearlist.me.** The agent handles account creation, photo processing, listing generation, and publishing entirely through conversation.
@@ -16,6 +11,28 @@ cd mcp-server
 npm install
 npm run build
 ```
+
+## CLI
+
+The package also ships a `clearlist` command-line tool for scripting seller
+actions directly against the REST API — no MCP host required:
+
+```bash
+npm install -g @clearlist/mcp-server
+
+clearlist login you@example.com        # send a 6-digit sign-in code
+clearlist verify you@example.com 123456  # store the API key in ~/.clearlist/config.json
+clearlist items                        # list your listings
+clearlist publish --city "Austin"      # publish the sale page, get the URL
+clearlist reservations                 # who reserved what
+clearlist reply <conversationId> "Yes, still available"
+clearlist picked-up <itemId>           # mark an item sold
+clearlist status                       # plan, capacity, expiry
+```
+
+Every command prints JSON (pipe to `jq` for scripting). `CLEARLIST_API_KEY`
+overrides the stored key; `CLEARLIST_API_URL` overrides the default
+`https://clearlist.me`. Run `clearlist help` for the full reference.
 
 ## Two Ways to Connect
 

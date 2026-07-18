@@ -51,13 +51,32 @@ export class ClearListApiClient {
   private baseUrl: string
   private sellerUid: string
   private apiKey: string | undefined
+  private clientIp: string | undefined
   private requestCount = 0
   private timeoutMs: number
 
-  constructor(config: { baseUrl: string; sellerUid: string; apiKey?: string; timeoutMs?: number }) {
+  constructor(config: {
+    baseUrl: string
+    sellerUid: string
+    apiKey?: string
+    timeoutMs?: number
+    /**
+     * The real caller's IP, when this client is proxying a request on
+     * behalf of someone else (the remote MCP endpoint). Forwarded as
+     * X-Forwarded-For so the underlying REST routes' per-IP rate limits
+     * (e.g. send-code's) key on the actual caller instead of collapsing
+     * every remote-MCP request into one shared 'unknown' bucket — this
+     * client's own outbound fetch would otherwise be indistinguishable
+     * from any other caller. The stdio distribution never sets this: a
+     * local CLI process IS the real caller as far as the REST server's
+     * TCP connection is concerned, so there's nothing to forward.
+     */
+    clientIp?: string
+  }) {
     this.baseUrl = config.baseUrl.replace(/\/$/, '')
     this.sellerUid = config.sellerUid
     this.apiKey = config.apiKey
+    this.clientIp = config.clientIp
     this.timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS
   }
 
@@ -148,6 +167,9 @@ export class ClearListApiClient {
     }
     if (this.apiKey) {
       headers['X-ClearList-API-Key'] = this.apiKey
+    }
+    if (this.clientIp) {
+      headers['X-Forwarded-For'] = this.clientIp
     }
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -433,6 +455,9 @@ export class ClearListApiClient {
     // Authenticate via API key — the backend maps this to the seller's UID
     if (this.apiKey) {
       headers['X-ClearList-API-Key'] = this.apiKey
+    }
+    if (this.clientIp) {
+      headers['X-Forwarded-For'] = this.clientIp
     }
 
     // Retry loop with exponential backoff for transient errors
