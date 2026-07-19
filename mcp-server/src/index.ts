@@ -48,6 +48,7 @@ import { ClearListApiClient } from './api-client.js'
 import { registerOnboardingTools } from './onboarding-tools.js'
 import { registerSellerTools } from './seller-tools.js'
 import { registerDiscoveryTools } from './discovery-tools.js'
+import { registerUiResources } from './ui/register.js'
 
 // ── Configuration ────────────────────────────────────────────────────────────
 const API_URL = process.env.CLEARLIST_API_URL || 'https://clearlist.me'
@@ -81,6 +82,11 @@ registerOnboardingTools(server, api)
 // Seller tools (create_listing, bulk_create_listings, publish_page, etc.)
 // These require an API key — either from env or from verify_code.
 registerSellerTools(server, api)
+// MCP Apps (SEP-1865): the shared ui:// view for get_listings / publish_page /
+// get_reservations. Hosts without UI support ignore it. Registered at the
+// entry point (not inside registerSellerTools) so the tool modules stay free
+// of relative value imports — see src/ui/register.ts header.
+registerUiResources(server)
 
 // Discovery tools (search_items, get_sales_near, get_city_sales)
 // Read-only, Phase 14.

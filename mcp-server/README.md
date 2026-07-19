@@ -34,6 +34,16 @@ Every command prints JSON (pipe to `jq` for scripting). `CLEARLIST_API_KEY`
 overrides the stored key; `CLEARLIST_API_URL` overrides the default
 `https://clearlist.me`. Run `clearlist help` for the full reference.
 
+## MCP Apps (interactive UI)
+
+`get_listings`, `publish_page`, and `get_reservations` declare an
+[MCP Apps](https://modelcontextprotocol.io/extensions/apps/overview) view
+(`ui://clearlist/app.html`) via `_meta.ui.resourceUri`. Hosts that render MCP
+Apps (ChatGPT, Claude.ai) show a listings gallery, a publish success card, or
+a reservations summary inline; hosts without UI support ignore the metadata
+and get the same JSON as before. View sources live in `src/ui/views/` and are
+bundled into `src/ui/generated-views.ts` with `npm run build:ui`.
+
 ## Two Ways to Connect
 
 ### Option A: New user (no account yet)

@@ -1,6 +1,6 @@
 {
   "name": "@clearlist/mcp-server",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "mcpName": "io.github.Cuneiform-LLC/clearlist",
   "private": false,
   "description": "ClearList MCP Server — AI agent interface to the ClearList API",
@@ -36,6 +36,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "build:ui": "node src/ui/build-ui.mjs",
     "postbuild": "node -e \"try{const{chmodSync}=require('fs');chmodSync('dist/index.js',0o755);chmodSync('dist/cli.js',0o755)}catch(e){}\"",
     "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
@@ -47,7 +48,9 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.4",
     "@types/node": "^26.1.1",
+    "esbuild": "0.28.1",
     "tsx": "^4.22.4",
     "typescript": "^7.0.2"
   },

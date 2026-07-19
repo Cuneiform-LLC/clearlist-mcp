@@ -12,6 +12,23 @@ import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { ClearListApiClient } from './api-client.js'
 
+/**
+ * MCP Apps (SEP-1865) tool metadata: links a tool to the shared ui:// view.
+ * Sets both the standard key (`ui.resourceUri`) and OpenAI's legacy Apps-SDK
+ * key (`openai/outputTemplate`) so older ChatGPT ingestion also renders it.
+ *
+ * Defined as a literal rather than imported from ./ui/register.js: this file
+ * is compiled by BOTH the node dist build and the Next.js remote endpoint,
+ * and files on that dual path must keep relative imports type-only (node
+ * needs `.js` specifiers, the bundler can't resolve them to .ts). Keep the
+ * URI in sync with UI_APP_RESOURCE_URI in src/ui/register.ts — the entry
+ * points (index.ts, /api/mcp route) call registerUiResources() there.
+ */
+const UI_TOOL_META: Record<string, unknown> = {
+  ui: { resourceUri: 'ui://clearlist/app.html' },
+  'openai/outputTemplate': 'ui://clearlist/app.html',
+}
+
 export function registerSellerTools(
   server: McpServer,
   api: ClearListApiClient,
@@ -444,6 +461,7 @@ export function registerSellerTools(
       title: 'Publish Sale Page',
       readOnlyHint: false,
     },
+    _meta: UI_TOOL_META,
   }, async (args) => {
     const result = await api.post<{ slug: string; url: string }>('/api/pages/publish', args)
 
@@ -512,6 +530,7 @@ export function registerSellerTools(
       title: 'Get Listings',
       readOnlyHint: true,
     },
+    _meta: UI_TOOL_META,
   }, async () => {
     const result = await api.get('/api/items')
 
@@ -542,6 +561,9 @@ export function registerSellerTools(
             requires_truck: item.requires_truck,
             queue_count: item.queue_count || 0,
             photos: (item.photos as string[] || []).length,
+            // First photo URL so UI-rendering hosts (MCP Apps) can show a
+            // thumbnail. Additive — agents that only read counts are unaffected.
+            photo_url: (item.photos as string[] || [])[0] ?? null,
           })),
         }, null, 2),
       }],
@@ -560,6 +582,7 @@ export function registerSellerTools(
       title: 'Get Reservations',
       readOnlyHint: true,
     },
+    _meta: UI_TOOL_META,
   }, async () => {
     const result = await api.get('/api/conversations')
 
@@ -583,6 +606,11 @@ export function registerSellerTools(
             buyer_name: conv.buyer_name,
             unread_messages: conv.unread_count_seller,
             last_message: conv.last_message,
+            // The reservation object only carries item_ids — surface the
+            // display fields the API computes so agents and the MCP Apps
+            // view can show WHAT was reserved without a second lookup.
+            first_item_title: conv.first_item_title,
+            item_count: conv.item_count,
             reservation: conv.reservation,
           })),
         }, null, 2),
