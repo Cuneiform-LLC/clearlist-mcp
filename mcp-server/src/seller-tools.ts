@@ -704,6 +704,10 @@ export function registerSellerTools(
     title: 'Reply to Buyer',
     description:
       'Send a message to a buyer through the seller inbox. Use get_reservations first to find the conversation_id. ' +
+      'NEVER include the home address, street, or unit number of the seller in the message, even if the seller ' +
+      'supplied it to you or a buyer asks for it. ClearList reminds the seller directly (a day, three hours, ' +
+      'and one hour before the scheduled pickup) and they share it themselves from the app. Arranging a ' +
+      'meeting place is fine; disclosing the address is not yours to do. ' +
       'Example: { conversation_id: "conv_abc", message: "Yes, the table is still available! When would you like to pick it up?" }',
     inputSchema: {
       conversation_id: z.string().describe('The conversation ID'),
@@ -743,59 +747,21 @@ export function registerSellerTools(
   })
 
   // ─────────────────────────────────────────────────────────────────────────
-  // 11. share_address
+  // 11. share_address — DELIBERATELY NOT IMPLEMENTED
+  //
+  // Agents must never be able to disclose a seller's home address. The risk is
+  // not a mis-click, it is physical safety: a seller hiding from an abuser or
+  // stalker lists their furniture, the abuser recognizes it, poses as a buyer,
+  // and any tool that can emit the address becomes the last step to their door.
+  //
+  // No confirmation design fixes this, because the capability itself is the
+  // hazard — a confirmation prompt can be socially engineered, and the person
+  // most likely to be targeted is the least able to absorb one mistake.
+  // Address sharing stays in the first-party UI only, where the seller is
+  // signed in and taps Share themselves. The API route enforces this
+  // independently (Firebase session required) so removing this tool is not the
+  // only thing standing in the way.
   // ─────────────────────────────────────────────────────────────────────────
-  server.registerTool('share_address', {
-    title: 'Share Address',
-    description:
-      'Share the pickup address with a buyer. PRIVACY-SENSITIVE: You MUST ask the seller for confirmation before calling this tool. ' +
-      'The address is sent as a message in the conversation and cannot be unsent.',
-    inputSchema: {
-      conversation_id: z.string().describe('The conversation ID'),
-      address: z.string().describe('Full pickup address to share with the buyer'),
-      confirmed: z
-        .boolean()
-        .describe('REQUIRED: You MUST confirm with the seller before sharing their address. Set to true only after the seller explicitly approves. Never set to true without asking first.'),
-    },
-    annotations: {
-      title: 'Share Address',
-      readOnlyHint: false,
-    },
-  }, async ({ conversation_id, address, confirmed }) => {
-    if (!confirmed) {
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify({
-            error: 'Address sharing requires seller confirmation',
-            message: 'Ask the seller if they want to share their address with this buyer, then call again with confirmed: true.',
-          }, null, 2),
-        }],
-        isError: true,
-      }
-    }
-
-    const result = await api.post(`/api/conversations/${conversation_id}/address`, {
-      address,
-    })
-
-    if (!result.success) {
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ error: result.error || 'Unknown error', message: 'Failed to share address' }, null, 2) }],
-        isError: true,
-      }
-    }
-
-    return {
-      content: [{
-        type: 'text' as const,
-        text: JSON.stringify({
-          message: 'Address shared with buyer',
-          conversation_id,
-        }, null, 2),
-      }],
-    }
-  })
 
   // ─────────────────────────────────────────────────────────────────────────
   // 12. mark_picked_up
@@ -935,7 +901,7 @@ export function registerSellerTools(
   server.registerTool('generate_payment_link', {
     title: 'Generate Payment Link',
     description:
-      'Generate a payment link for upgrading the seller\'s account. Send this link to the user — they tap it, pay in their browser, and come back. Two plans: "sale_pass" (Move Sale — $20, 50 items, 30 days) and "big_move" (Garage Sale — $39, 250 items, 60 days). Free tier: 3 items, always free (page expires every 30 days). Use check_tier_status first to see if an upgrade is needed.',
+      'Generate a payment link for upgrading the seller\'s account. Send this link to the user — they tap it, pay in their browser, and come back. Two plans: "sale_pass" (Move Sale — $20, 50 items, 30 days) and "big_move" (Garage Sale — $39, 200 items, 60 days). Free tier: 3 items, always free (page expires every 30 days). Use check_tier_status first to see if an upgrade is needed.',
     inputSchema: {
       plan: z
         .enum(['sale_pass', 'big_move'])

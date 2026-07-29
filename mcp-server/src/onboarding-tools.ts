@@ -151,7 +151,6 @@ export function registerOnboardingTools(
             'get_listings — See all items',
             'get_reservations — See buyer reservations and messages',
             'reply_to_buyer — Send a message to a buyer',
-            'share_address — Share pickup address with a buyer',
             'mark_picked_up — Mark item as sold',
             'set_availability — Configure pickup scheduling',
             'check_tier_status — Check remaining item slots and plan details',

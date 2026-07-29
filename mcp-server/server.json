@@ -1,19 +1,19 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Cuneiform-LLC/clearlist",
-  "description": "AI agent interface to ClearList, an AI-powered moving-sale platform. Create photo listings, publish a shareable sale page, manage reservations and buyer messages, and set pickup availability.",
+  "description": "AI resale manager. Photograph an item, AI writes the listing, publish a sale page, manage pickups.",
   "repository": {
     "url": "https://github.com/Cuneiform-LLC/clearlist-mcp",
     "source": "github",
     "subfolder": "mcp-server"
   },
   "websiteUrl": "https://clearlist.me/developers",
-  "version": "0.3.1",
+  "version": "0.4.2",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@clearlist/mcp-server",
-      "version": "0.3.1",
+      "version": "0.4.2",
       "transport": {
         "type": "stdio"
       },

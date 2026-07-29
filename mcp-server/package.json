@@ -1,6 +1,6 @@
 {
   "name": "@clearlist/mcp-server",
-  "version": "0.4.0",
+  "version": "0.4.2",
   "mcpName": "io.github.Cuneiform-LLC/clearlist",
   "private": false,
   "description": "ClearList MCP Server — AI agent interface to the ClearList API",
@@ -18,7 +18,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/Cuneiform-LLC/clearlist-mcp.git",
+    "url": "git+https://github.com/Cuneiform-LLC/clearlist-mcp.git",
     "directory": "mcp-server"
   },
   "homepage": "https://clearlist.me/developers",
@@ -51,11 +51,11 @@
     "@modelcontextprotocol/ext-apps": "1.7.4",
     "@types/node": "^26.1.1",
     "esbuild": "0.28.1",
-    "tsx": "^4.22.4",
+    "tsx": "^4.23.1",
     "typescript": "^7.0.2"
   },
   "overrides": {
-    "fast-uri": ">=3.1.1",
+    "fast-uri": ">=3.1.4 <4 || >=4.1.1",
     "protobufjs": ">=7.5.8 <8",
     "@protobufjs/utf8": ">=1.1.1",
     "brace-expansion": ">=1.1.12 <2 || >=2.0.2 <3",

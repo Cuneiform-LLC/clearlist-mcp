@@ -1,6 +1,8 @@
 # ClearList MCP Server
 
-AI agent interface to the ClearList moving sale platform. Any MCP-compatible agent (Claude, ChatGPT, Gemini, Manus, custom agents) can create listings, publish sale pages, and manage reservations — all through the same API routes the web UI uses.
+[![smithery badge](https://smithery.ai/badge/clearlist/clearlist)](https://smithery.ai/servers/clearlist/clearlist)
+
+AI agent interface to ClearList, an AI resale manager. Any MCP-compatible agent (Claude, ChatGPT, Gemini, Manus, custom agents) can create listings, publish sale pages, and manage reservations — all through the same API routes the web UI uses.
 
 **Users never need to visit clearlist.me.** The agent handles account creation, photo processing, listing generation, and publishing entirely through conversation.
 
@@ -147,7 +149,6 @@ ChatGPT: "Done! Your sale page is live at clearlist.me/grandmas-sale
 | `get_reservations` | See buyer reservations, messages, timer status |
 | `get_conversation` | Get full message thread with a specific buyer |
 | `reply_to_buyer` | Send message to a buyer |
-| `share_address` | Share pickup address with a buyer (privacy-sensitive) |
 | `mark_picked_up` | Mark item as sold |
 | `confirm_pickup` | Confirm a scheduled pickup |
 | `get_page_stats` | Page views, item count, reservation stats |

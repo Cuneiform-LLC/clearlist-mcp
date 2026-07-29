@@ -1,6 +1,6 @@
 # ClearList — Developer & Agent Surface
 
-[ClearList](https://clearlist.me) is an AI-powered moving sale platform: photograph your stuff, AI writes complete priced listings in about 30 seconds, and one shareable link runs an automatic buyer queue. Built for movers, downsizers, and estate sales.
+[ClearList](https://clearlist.me) is an AI resale manager: photograph your stuff, AI writes complete priced listings in about 30 seconds, and one shareable link runs an automatic buyer queue. Built for movers, downsizers, estate sales, and anyone clearing out more than a few things.
 
 This repository is the **public developer surface** for ClearList — the Model Context Protocol (MCP) server and the documentation AI agents need to use ClearList programmatically. Every action a seller can take in the web UI is available here through the API and MCP server.
 

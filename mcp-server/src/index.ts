@@ -3,7 +3,7 @@
 /**
  * ClearList MCP Server
  *
- * AI agent interface to the ClearList moving sale platform.
+ * AI agent interface to ClearList, an AI resale manager.
  *
  * Any AI agent (ChatGPT, Gemini, Claude, Manus) can use this to manage
  * moving sales on behalf of users. The user never needs to visit clearlist.me.
@@ -62,10 +62,23 @@ const api = new ClearListApiClient({
   apiKey: API_KEY,
 })
 
+/** Single source of truth for this file — the constructor and the startup log
+ *  both read it, so they cannot drift apart. Keep in lockstep with the other
+ *  version locations listed in PUBLISHING.md. */
+const SERVER_VERSION = '0.4.2'
+
 const server = new McpServer(
   {
     name: 'clearlist',
-    version: '0.3.0',
+    version: SERVER_VERSION,
+    title: 'ClearList',
+    description:
+      'AI resale manager. Photograph an item, AI writes the listing, publish a sale page, manage pickups.',
+    websiteUrl: 'https://clearlist.me/developers',
+    icons: [
+      { src: 'https://clearlist.me/icons/icon-512.png', mimeType: 'image/png', sizes: ['512x512'] },
+      { src: 'https://clearlist.me/icons/icon-192.png', mimeType: 'image/png', sizes: ['192x192'] },
+    ],
   },
   {
     capabilities: {
@@ -98,7 +111,7 @@ async function main() {
   await server.connect(transport)
 
   // Log to stderr (stdout is reserved for MCP protocol)
-  console.error(`ClearList MCP Server v0.3.0`)
+  console.error(`ClearList MCP Server v${SERVER_VERSION}`)
   console.error(`  API: ${API_URL}`)
   if (API_KEY) {
     console.error(`  Auth: API key (${API_KEY.slice(0, 6)}...${API_KEY.slice(-4)})`)
@@ -107,7 +120,7 @@ async function main() {
     console.error(`  Auth: None yet`)
     console.error(`  Mode: Onboarding — use send_verification_code + verify_code to authenticate`)
   }
-  console.error(`  Tools: 24 (2 onboarding + 19 seller + 3 discovery)`)
+  console.error(`  Tools: 23 (2 onboarding + 18 seller + 3 discovery)`)
   console.error(`  Ready.`)
 }
 
