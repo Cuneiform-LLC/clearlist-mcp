@@ -429,12 +429,24 @@ export function registerSellerTools(
       }
     }
 
+    // Forward already_deleted rather than reporting a flat success.
+    //
+    // Hard delete made a repeat call a visible 404. A tombstone makes it a
+    // no-op that looks identical to a real delete, so an agent acting on a
+    // stale item_id (confused ids mid-batch, a retried call after a crashed
+    // session) would get "deleted successfully" for something it did not
+    // touch. restore_listing already forwards downgraded_to_inactive for the
+    // same reason; this is the other half of that.
+    const data = (result.data ?? {}) as Record<string, unknown>
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
-          message: 'Listing deleted. Restorable for 7 days with restore_listing.',
+          message: data.already_deleted
+            ? 'This item was ALREADY deleted — this call changed nothing. Check you have the right item_id.'
+            : 'Listing deleted. Restorable for 7 days with restore_listing.',
           item_id,
+          already_deleted: data.already_deleted ?? false,
         }, null, 2),
       }],
     }
