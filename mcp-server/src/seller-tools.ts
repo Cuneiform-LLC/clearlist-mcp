@@ -406,11 +406,11 @@ export function registerSellerTools(
   server.registerTool('delete_listing', {
     title: 'Delete Listing',
     description:
-      'Delete a listing. Reversible for 24 hours: the item is hidden from the ' +
+      'Delete a listing. Reversible for 7 days: the item is hidden from the ' +
       'sale page and the dashboard and stops counting against the active-item ' +
-      'limit, then is permanently removed after the window. Restore it within ' +
-      'that window by calling POST /api/items/{id}/restore. Cannot delete items ' +
-      'with active reservations. Deleting an already-deleted item is a safe no-op.',
+      'limit, then is permanently removed after the window. Use restore_listing ' +
+      'to undo it within that window. Cannot delete items with active ' +
+      'reservations. Deleting an already-deleted item is a safe no-op.',
     inputSchema: {
       item_id: z.string().describe('The item ID to delete'),
     },
@@ -433,8 +433,64 @@ export function registerSellerTools(
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
-          message: 'Listing deleted successfully',
+          message: 'Listing deleted. Restorable for 7 days with restore_listing.',
           item_id,
+        }, null, 2),
+      }],
+    }
+  })
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 4b. restore_listing
+  //
+  // Without this tool the restore window is unreachable for exactly the seller
+  // it protects. delete_listing is callable by an agent, so an injected delete
+  // arrives through an agent — and an agent has tools, not arbitrary HTTP. A
+  // seller who never opens the PWA would have had no way to undo.
+  // ─────────────────────────────────────────────────────────────────────────
+  server.registerTool('restore_listing', {
+    title: 'Restore Listing',
+    description:
+      'Undo a delete_listing within its 7-day window. The listing comes back ' +
+      'with the status it had before deletion. If the seller has since filled ' +
+      'their active-item limit, it is restored as inactive instead of failing — ' +
+      'check downgraded_to_inactive in the response and tell the user, because ' +
+      'an inactive item does not appear on the sale page. Returns an error if ' +
+      'the window has passed or the item was never deleted.',
+    inputSchema: {
+      item_id: z.string().describe('The item ID to restore'),
+    },
+    annotations: {
+      title: 'Restore Listing',
+      readOnlyHint: false,
+      // Not destructive: this is the undo. Marking it destructive would make
+      // cautious hosts gate the recovery path behind the same friction as the
+      // deletion it reverses.
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+  }, async ({ item_id }) => {
+    const result = await api.post(`/api/items/${item_id}/restore`)
+
+    if (!result.success) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: result.error || 'Unknown error', message: 'Failed to restore listing' }, null, 2) }],
+        isError: true,
+      }
+    }
+
+    const data = (result.data ?? {}) as Record<string, unknown>
+    return {
+      content: [{
+        type: 'text' as const,
+        text: JSON.stringify({
+          message: data.downgraded_to_inactive
+            ? 'Listing restored as INACTIVE — it is not visible on the sale page until the seller frees an active slot.'
+            : 'Listing restored',
+          item_id,
+          status: data.status,
+          downgraded_to_inactive: data.downgraded_to_inactive ?? false,
+          ...(data.message ? { detail: data.message } : {}),
         }, null, 2),
       }],
     }
