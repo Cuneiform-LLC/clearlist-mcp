@@ -61,7 +61,7 @@ export function mountView<T>(name: string, render: (data: T) => string): void {
   const root = document.getElementById('root')
   if (!root) return
 
-  const app = new App({ name, version: '0.4.1' })
+  const app = new App({ name, version: '0.5.0' })
 
   app.ontoolresult = (params: ToolResultParams) => {
     if (params.isError) {

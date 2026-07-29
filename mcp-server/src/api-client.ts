@@ -10,6 +10,8 @@
  * no Firebase token needed.
  */
 
+import { randomUUID } from 'node:crypto'
+
 /** Default request timeout: 120 seconds (increased from 30s — AI routes can take 60-120s) */
 const DEFAULT_TIMEOUT_MS = 120_000
 
@@ -121,7 +123,14 @@ export class ClearListApiClient {
     const url = new URL(path, this.baseUrl)
     return this.request<T>(url.toString(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        // Generated HERE, once per logical call, not inside request()'s retry
+        // loop — request() copies init.headers into its header map before the
+        // loop starts, so every attempt reuses this exact key. That is the
+        // whole point: a retried write must be recognisable as the SAME write.
+        'Idempotency-Key': randomUUID(),
+      },
       body: JSON.stringify(body ?? {}),
     })
   }
@@ -133,7 +142,10 @@ export class ClearListApiClient {
     const url = new URL(path, this.baseUrl)
     return this.request<T>(url.toString(), {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': randomUUID(),
+      },
       body: JSON.stringify(body ?? {}),
     })
   }
@@ -507,6 +519,24 @@ export class ClearListApiClient {
               error: truncateBody(responseText) || `HTTP ${response.status}`,
             } as ApiResponse<T>
           }
+        }
+
+        // 409 idempotency_conflict means OUR OWN earlier attempt for this key
+        // is still executing server-side. The server's documented contract is
+        // "retry after a short delay" — surfacing it would turn a slow write
+        // into a spurious failure, and the agent's natural response (call the
+        // tool again with a NEW key) is exactly the duplicate we are
+        // preventing. Narrowed to the code, not the bare status, so genuine
+        // 409s from other routes still propagate.
+        if (
+          response.status === 409 &&
+          (json as { code?: string }).code === 'idempotency_conflict' &&
+          attempt < MAX_RETRIES
+        ) {
+          const backoff = RETRY_BACKOFF_MS[attempt] || RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1]
+          console.warn(`[MCP] idempotency conflict on ${url}, retry ${attempt + 1}/${MAX_RETRIES} in ${backoff}ms`)
+          await new Promise((resolve) => setTimeout(resolve, backoff))
+          continue
         }
 
         // Preserve HTTP status on every non-2xx response so callers (e.g.,
