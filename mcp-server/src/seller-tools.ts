@@ -55,7 +55,10 @@ const UI_TOOL_META: Record<string, unknown> = {
  * classifies. If they all change, this degrades to the old behaviour (409 =
  * retryable), which is the failure we already know how to spot.
  */
-function classifyItemWriteFailure(result: { error?: string; http_status?: number }): {
+// Exported for the test lane only — no runtime caller outside this file. It is
+// pinned because getting it wrong is not a cosmetic bug: deriving `retryable`
+// from the 409 status alone is what put a looping agent into an infinite retry.
+export function classifyItemWriteFailure(result: { error?: string; http_status?: number }): {
   http_status?: number
   retryable: boolean
   next_action?: 'restore_listing'
