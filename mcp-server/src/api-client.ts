@@ -176,6 +176,18 @@ export class ClearListApiClient {
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      // Built once, outside the retry loop below, so all four attempts carry the
+      // same key — the same reason post()/put() generate it at the call site.
+      //
+      // READ THIS BEFORE ASSUMING RETRIES ARE SAFE: the only route that uses
+      // postStream is /api/items/bulk-group, and that route does NOT call
+      // withIdempotency (see src/__tests__/api/idempotency-route-wiring.test.ts
+      // for the list of routes that do). So the key is inert today: a retry on
+      // 429/500/503 re-runs the Gemini grouping call and bills for it twice.
+      // Sending the header anyway keeps this method consistent with post()/put()
+      // and makes the fix server-side-only — wrap bulk-group and the duplicate
+      // charge stops without touching this file.
+      'Idempotency-Key': randomUUID(),
     }
     if (this.apiKey) {
       headers['X-ClearList-API-Key'] = this.apiKey

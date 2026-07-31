@@ -29,6 +29,62 @@ const UI_TOOL_META: Record<string, unknown> = {
   'openai/outputTemplate': 'ui://clearlist/app.html',
 }
 
+/**
+ * Classify a failed `PUT /api/items/[id]` by the KIND of failure, not by the
+ * bare status code.
+ *
+ * The route returns THREE different 409s, and only one of them is retryable:
+ *
+ *   - "This item is deleted. Restore it first: POST /api/items/{id}/restore"
+ *     is permanent for as long as the tombstone stands. Retrying the PUT hits
+ *     the same guard every time, so `retryable: http_status === 409` pointed an
+ *     agent at an infinite loop instead of at restore_listing. Emitted from all
+ *     three tombstone guards in the route (the up-front status check, the two
+ *     in-transaction checkFreshItem calls, and the guarded no-status-change
+ *     write).
+ *   - "Cannot update: this seller account is missing or incomplete." is an
+ *     account-level inconsistency. No retry and no tool can fix it; the agent
+ *     should surface it to the seller. It fell through to the retryable default
+ *     until it got its own branch.
+ *   - "This item changed while you were editing it." is a lost race with
+ *     auto-fill or with a buyer reserving the item. Re-read and retry is right —
+ *     the ONLY one of the three that should be retried.
+ *
+ * Matched on the message because the route sends no machine-readable code for
+ * any of them. Independent phrases are tested per case so a reword of one still
+ * classifies. If they all change, this degrades to the old behaviour (409 =
+ * retryable), which is the failure we already know how to spot.
+ */
+function classifyItemWriteFailure(result: { error?: string; http_status?: number }): {
+  http_status?: number
+  retryable: boolean
+  next_action?: 'restore_listing'
+} {
+  const message = result.error ?? ''
+  if (/is deleted|restore it first/i.test(message)) {
+    return {
+      http_status: result.http_status,
+      retryable: false,
+      next_action: 'restore_listing',
+    }
+  }
+  // The third 409: "Cannot update: this seller account is missing or
+  // incomplete." An account-level inconsistency, not an edit conflict —
+  // retrying returns the same 409 forever, which is exactly the loop this
+  // classifier was added to eliminate. Without this branch it fell through to
+  // the `409 → retryable` default below and told the agent to keep trying.
+  if (/seller account is missing or incomplete/i.test(message)) {
+    return {
+      http_status: result.http_status,
+      retryable: false,
+    }
+  }
+  return {
+    http_status: result.http_status,
+    retryable: result.http_status === 409,
+  }
+}
+
 export function registerSellerTools(
   server: McpServer,
   api: ClearListApiClient,
@@ -113,12 +169,26 @@ export function registerSellerTools(
       category: (aiResult as Record<string, unknown>).category,
     })
 
+    // Forward the route's `inactive` flag instead of reporting a flat success.
+    //
+    // POST /api/items does not refuse an over-limit item, it saves it with
+    // status 'inactive' (decideItemCreation — the upgrade nudge). An inactive
+    // item is not on the sale page, so dropping the flag made this tool say
+    // "created successfully" about a listing no buyer can see. The agent then
+    // tells the seller their item is live and neither of them finds out until
+    // nothing is ever reserved.
+    const created = (createResult.data ?? {}) as Record<string, unknown>
+    const isInactive = created.inactive === true
+
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
-          message: 'Listing created successfully',
-          item_id: (createResult.data as Record<string, unknown>)?.item_id,
+          message: isInactive
+            ? 'Listing SAVED BUT NOT LIVE. It was stored as inactive because the seller is at their active-item limit, so buyers cannot see it on the sale page. Free a slot (mark_picked_up or delete_listing on another item), or use check_tier_status and generate_payment_link to raise the limit, then set this one to available with edit_listing.'
+            : 'Listing created successfully',
+          item_id: created.item_id,
+          inactive: isInactive,
           listing: aiResult,
           price_research: priceResult.success ? priceResult.data : null,
         }, null, 2),
@@ -223,6 +293,7 @@ export function registerSellerTools(
               price_research: null,
               bundle_price: null,
               qa: null,
+              inactive: false,
               status: 'failed' as const,
             }
           }
@@ -272,13 +343,21 @@ export function registerSellerTools(
 
           // Step 3d: Save the item
           let itemId = null
+          let savedInactive = false
           const saveResult = await api.post('/api/items', {
             fromTry: true,
             photos: groupPhotoUrls,
             aiResult: listing,
           })
           if (saveResult.success) {
-            itemId = (saveResult.data as Record<string, unknown>)?.item_id
+            const saved = (saveResult.data ?? {}) as Record<string, unknown>
+            itemId = saved.item_id
+            // Same route flag as create_listing. It matters more here: in a
+            // 50-photo batch, everything past the active-item limit comes back
+            // inactive, so for a free-tier seller that is items 4 onward. A flat
+            // 'saved' for all of them reports a whole sale as live when most of
+            // it is invisible to buyers.
+            savedInactive = saved.inactive === true
           }
 
           return {
@@ -291,7 +370,10 @@ export function registerSellerTools(
             price_research: finalPricing,
             bundle_price: bundlePricing,
             qa,
-            status: itemId ? 'saved' : 'generated_but_not_saved',
+            inactive: savedInactive,
+            status: itemId
+              ? (savedInactive ? 'saved_inactive' : 'saved')
+              : 'generated_but_not_saved',
           }
         }),
       )
@@ -308,6 +390,7 @@ export function registerSellerTools(
             listing: null,
             price_research: null,
             qa: null,
+            inactive: false,
             status: 'failed',
             error: result.reason?.message || 'Processing failed',
           })
@@ -315,16 +398,30 @@ export function registerSellerTools(
       }
     }
 
-    const savedCount = items.filter((i) => i.status === 'saved').length
+    // 'saved_inactive' still counts as saved — the item exists, it is just not
+    // visible. Counting it separately as well is what stops the summary line
+    // from implying the whole batch is on the sale page.
+    const savedCount = items.filter(
+      (i) => i.status === 'saved' || i.status === 'saved_inactive',
+    ).length
+    const inactiveCount = items.filter((i) => i.status === 'saved_inactive').length
     const failedCount = items.filter((i) => i.status === 'failed').length
+
+    const summary = `Processed ${groups.length} items: ${savedCount} saved, ${failedCount} failed`
+    const inactiveNote = inactiveCount > 0
+      ? ` WARNING: ${inactiveCount} of the saved items are INACTIVE (over the seller's active-item limit) and are NOT visible on the sale page. Check check_tier_status, then free slots or raise the limit and set them to available with edit_listing.`
+      : ''
 
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
-          message: `Processed ${groups.length} items: ${savedCount} saved, ${failedCount} failed`,
+          message: summary + inactiveNote,
           total_photos: photos.length,
           total_items: groups.length,
+          saved_count: savedCount,
+          inactive_count: inactiveCount,
+          failed_count: failedCount,
           items,
         }, null, 2),
       }],
@@ -382,7 +479,17 @@ export function registerSellerTools(
 
     if (!result.success) {
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ error: result.error || 'Unknown error', message: 'Failed to update listing' }, null, 2) }],
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          error: result.error || 'Unknown error',
+          // http_status is forwarded so the agent can branch on the class of
+          // failure (400s for tier and validation refusals, 403/404 for the
+          // wrong item) instead of pattern-matching prose. `retryable` cannot
+          // come from the status alone: both of this route's 409s share it and
+          // one of them never clears without restore_listing. See
+          // classifyItemWriteFailure.
+          ...classifyItemWriteFailure(result),
+          message: 'Failed to update listing',
+        }, null, 2) }],
         isError: true,
       }
     }
@@ -437,13 +544,20 @@ export function registerSellerTools(
     // session) would get "deleted successfully" for something it did not
     // touch. restore_listing already forwards downgraded_to_inactive for the
     // same reason; this is the other half of that.
+    //
+    // What the message must NOT do is blame the caller. api-client retries
+    // DELETE on a timeout and on 429/500/503, and sends no Idempotency-Key on
+    // DELETE, so the second attempt genuinely re-reaches the route and lands on
+    // the tombstone the first attempt created. That is the most likely cause of
+    // this flag, and the agent did nothing wrong. already_deleted cannot
+    // distinguish that from a wrong id, so it must not assert either one.
     const data = (result.data ?? {}) as Record<string, unknown>
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
           message: data.already_deleted
-            ? 'This item was ALREADY deleted — this call changed nothing. Check you have the right item_id.'
+            ? 'This item was ALREADY deleted, so this call changed nothing. Usually that means an earlier delete succeeded and this was a retry, which is fine. It can also mean a stale or wrong item_id. Verify with get_listings (pass include_deleted: true to see tombstones), and use restore_listing if the item should come back.'
             : 'Listing deleted. Restorable for 7 days with restore_listing.',
           item_id,
           already_deleted: data.already_deleted ?? false,
@@ -485,8 +599,26 @@ export function registerSellerTools(
     const result = await api.post(`/api/items/${item_id}/restore`)
 
     if (!result.success) {
+      // Forward the status, same as edit_listing, because this route's failures
+      // mean four different things and the agent's next move differs for each:
+      //   410 the 7-day window has passed, the item is gone for good, STOP
+      //   409 never deleted (so probably already live), or the seller account
+      //       document is missing
+      //   404 no such item id
+      //   403 the item belongs to someone else
+      // None of those change on their own, so retrying is always wasted. Only a
+      // 5xx or a transport failure (no http_status, and api-client has already
+      // retried those three times) leaves any reason to try again.
+      const status = result.http_status
+      const retryable = status === undefined || status >= 500
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ error: result.error || 'Unknown error', message: 'Failed to restore listing' }, null, 2) }],
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          error: result.error || 'Unknown error',
+          http_status: status,
+          terminal: !retryable,
+          retryable,
+          message: 'Failed to restore listing',
+        }, null, 2) }],
         isError: true,
       }
     }
@@ -601,15 +733,31 @@ export function registerSellerTools(
   server.registerTool('get_listings', {
     title: 'Get Listings',
     description:
-      'Get all items for the seller. Returns each item\'s title, price, status, dimensions, queue count, and photos.',
-    inputSchema: {},
+      'Get all items for the seller. Returns each item\'s title, price, status, dimensions, queue count, and photos. ' +
+      'Deleted items are hidden by default. Pass include_deleted: true to also get items awaiting purge, which come back ' +
+      'with status "deleted", their deleted_at timestamp, and how much of the 7-day restore window is left. That is the ' +
+      'only way to find an item_id for restore_listing once you no longer have it.',
+    inputSchema: {
+      include_deleted: z
+        .boolean()
+        .optional()
+        .describe('Include soft-deleted items still inside their 7-day restore window. Default false. Use this to recover an item_id for restore_listing.'),
+    },
     annotations: {
       title: 'Get Listings',
       readOnlyHint: true,
     },
     _meta: UI_TOOL_META,
-  }, async () => {
-    const result = await api.get('/api/items')
+  }, async ({ include_deleted }) => {
+    // Without this, restore_listing is only usable while the item_id is still in
+    // the agent's context: GET /api/items filters tombstones out, so an agent
+    // that lost the id after a deletion had no way to name the item it needed to
+    // recover. Sent only when asked for, so the default response shape is
+    // unchanged for every caller that does not care.
+    const result = await api.get(
+      '/api/items',
+      include_deleted ? { include_deleted: 'true' } : undefined,
+    )
 
     if (!result.success) {
       return {
@@ -641,6 +789,22 @@ export function registerSellerTools(
             // First photo URL so UI-rendering hosts (MCP Apps) can show a
             // thumbnail. Additive — agents that only read counts are unaffected.
             photo_url: (item.photos as string[] || [])[0] ?? null,
+            // Tombstone context, forwarded verbatim for deleted items only.
+            //
+            // Copied by key prefix rather than mapped field by field because the
+            // route owns the name of the remaining-window field. Mapping a
+            // guessed name would turn a server-side rename into a silent `null`,
+            // which an agent reads as "no window left" and abandons a listing
+            // that was still recoverable. The contract this relies on: the
+            // window and tombstone fields are named `deleted_*` or `restor*`
+            // (deleted_at, restorable, restorable_until, restore_hours_remaining).
+            // A field outside those prefixes will not reach the agent — extend
+            // the pattern rather than adding a second mapping path.
+            ...(item.status === 'deleted'
+              ? Object.fromEntries(
+                  Object.entries(item).filter(([key]) => /^(deleted_|restor)/.test(key)),
+                )
+              : {}),
           })),
         }, null, 2),
       }],
@@ -861,7 +1025,15 @@ export function registerSellerTools(
 
     if (!result.success) {
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ error: result.error || 'Unknown error', message: 'Failed to mark item as picked up' }, null, 2) }],
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          error: result.error || 'Unknown error',
+          // Same PUT route as edit_listing, so the same two-flavoured 409: a
+          // race with auto-fill or a buyer reservation (re-read and retry) vs a
+          // tombstone (retrying can never succeed; restore_listing first).
+          // Deciding that from the status code alone put an agent in a loop.
+          ...classifyItemWriteFailure(result),
+          message: 'Failed to mark item as picked up',
+        }, null, 2) }],
         isError: true,
       }
     }
@@ -1085,42 +1257,86 @@ export function registerSellerTools(
       readOnlyHint: false,
     },
   }, async ({ reservation_id }) => {
-    // Fetch the reservation to get the cancel_token required by the pickup-confirm endpoint
-    const reservationResult = await api.get(`/api/reservations/${reservation_id}`)
-    if (!reservationResult.success || !reservationResult.data) {
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ error: reservationResult.error || 'Reservation not found', message: 'Failed to find reservation' }, null, 2) }],
-        isError: true,
-      }
-    }
-
-    const reservation = reservationResult.data as Record<string, unknown>
-    const cancelToken = reservation.cancel_token as string
-    if (!cancelToken) {
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ error: 'No cancel token found on reservation', message: 'Cannot confirm pickup without a valid reservation token' }, null, 2) }],
-        isError: true,
-      }
-    }
-
-    // Call the pickup-confirm endpoint with action=sold
-    const confirmResult = await api.get(
-      `/api/reservations/${reservation_id}/pickup-confirm?action=sold&token=${encodeURIComponent(cancelToken)}`,
-    )
+    // Authorized by the seller's own API key. The route accepts an
+    // authenticated owner as an alternative to the token in the seller's
+    // pickup-check email, so there is no token to fetch.
+    //
+    // This previously read `cancel_token` off GET /api/reservations/[id] and
+    // passed it back, which could never succeed: that route only echoes the
+    // field when the caller already supplied it, so the tool always stopped at
+    // "no cancel token found". It was also the BUYER's token — the route no
+    // longer accepts it from anyone.
+    const confirmResult = await api.post<{
+      outcome?: string
+      status?: string
+      item_count?: number
+      skipped_count?: number
+      retryable?: boolean
+      errored_count?: number
+    }>(`/api/reservations/${reservation_id}/pickup-confirm`, { action: 'sold' })
 
     if (!confirmResult.success) {
+      // Forward the structured partial-failure shape, not just the message.
+      //
+      // The route answers a basket where some item writes failed with 500 +
+      // `{ outcome: 'partial', retryable: true }`, and deliberately leaves the
+      // reservation ACTIVE so a retry finishes the remaining items. api-client
+      // already exhausted its own 5xx retries by the time we are here, so the
+      // agent is the one that has to decide whether to try again — and it
+      // cannot tell "some items are still unsold, retrying is safe and
+      // necessary" from a permanent failure out of a bare error string.
+      const failure = (confirmResult.data ?? {}) as {
+        outcome?: string
+        retryable?: boolean
+        errored_count?: number
+      }
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ error: confirmResult.error || 'Unknown error', message: 'Failed to confirm pickup' }, null, 2) }],
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            error: confirmResult.error || 'Unknown error',
+            message: 'Failed to confirm pickup',
+            reservation_id,
+            outcome: failure.outcome ?? null,
+            retryable: failure.retryable ?? false,
+            errored_count: failure.errored_count ?? null,
+          }, null, 2),
+        }],
         isError: true,
       }
     }
 
+    // Forward the outcome rather than flattening it to "confirmed". A
+    // reservation that was already completed, or a basket where some items
+    // could not be marked, is not the same event as a clean confirmation, and
+    // the agent is the only thing that can tell the seller which happened.
+    const data = confirmResult.data ?? {}
+    if (data.outcome === 'already_processed') {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            message: `This reservation was already ${data.status || 'handled'} — nothing changed.`,
+            reservation_id,
+            outcome: 'already_processed',
+            status: data.status ?? null,
+          }, null, 2),
+        }],
+      }
+    }
+
+    const skipped = data.skipped_count ?? 0
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
-          message: 'Pickup confirmed — items marked as sold',
+          message: skipped > 0
+            ? `Pickup confirmed, but ${skipped} item(s) could not be marked sold — they were deleted or already gone.`
+            : 'Pickup confirmed — items marked as sold',
           reservation_id,
+          outcome: 'confirmed',
+          item_count: data.item_count ?? null,
+          skipped_count: skipped,
         }, null, 2),
       }],
     }
