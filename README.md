@@ -11,6 +11,20 @@ This repository is the **public developer surface** for ClearList — the Model 
 
 ## Quick start
 
+The fastest path is the Agent Skill. One command, no clone, no build, and it works
+across Claude Code, Codex, Gemini CLI, Copilot, Antigravity, and a dozen other hosts:
+
+```bash
+npx skills add Cuneiform-LLC/clearlist-mcp
+```
+
+That installs the [`clearlist`](./skills/clearlist) skill, which teaches your agent the
+whole flow: no-browser account setup, bulk photo intake, publishing, the buyer queue,
+and the one capability it must never reach for. It also tells the agent to configure the
+MCP server below, so this is the only step most people need.
+
+If you would rather run the server from source:
+
 ```bash
 git clone https://github.com/Cuneiform-LLC/clearlist-mcp
 cd clearlist-mcp/mcp-server

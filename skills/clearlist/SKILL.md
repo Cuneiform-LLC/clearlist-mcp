@@ -1,6 +1,12 @@
 ---
 name: clearlist
 description: Run a real resale sale end to end. Turn photos of household items into priced listings, publish one shareable sale page, and manage a buyer queue, reservations, and pickup scheduling through the ClearList MCP server. Use when someone is moving, downsizing, clearing an estate, or otherwise selling more than a couple of things at once.
+license: MIT
+compatibility: Requires an MCP-capable host and network access to clearlist.me. The no-browser account setup works only over the npm package, not the OAuth-gated hosted server.
+metadata:
+  author: Cuneiform-LLC
+  version: "1.0"
+  homepage: https://clearlist.me/developers
 ---
 
 # ClearList
