@@ -7,6 +7,7 @@ This repository is the **public developer surface** for ClearList — the Model 
 ## What's here
 
 - [`mcp-server/`](./mcp-server) — the ClearList MCP server. Any MCP-compatible agent (Claude, ChatGPT, Gemini, Manus, custom agents) can onboard a seller, create listings, publish a sale page, and manage buyers. See its [README](./mcp-server/README.md) for full setup.
+- [`skills/clearlist/`](./skills/clearlist) — an [Agent Skill](https://skills.sh) that teaches an agent how to run a sale end to end with the MCP server above, including the one thing it must never do. Install with `npx skills add Cuneiform-LLC/clearlist-mcp`.
 
 ## Quick start
 
