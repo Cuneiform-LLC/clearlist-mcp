@@ -65,7 +65,7 @@ const api = new ClearListApiClient({
 /** Single source of truth for this file — the constructor and the startup log
  *  both read it, so they cannot drift apart. Keep in lockstep with the other
  *  version locations listed in PUBLISHING.md. */
-const SERVER_VERSION = '0.5.0'
+const SERVER_VERSION = '0.6.0'
 
 const server = new McpServer(
   {
@@ -120,7 +120,7 @@ async function main() {
     console.error(`  Auth: None yet`)
     console.error(`  Mode: Onboarding — use send_verification_code + verify_code to authenticate`)
   }
-  console.error(`  Tools: 23 (2 onboarding + 18 seller + 3 discovery)`)
+  console.error(`  Tools: 25 (2 onboarding + 20 seller + 3 discovery)`)
   console.error(`  Ready.`)
 }
 

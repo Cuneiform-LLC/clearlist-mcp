@@ -1,7 +1,7 @@
 /**
  * ClearList MCP — Seller Tools
  *
- * 19 tools that wrap the existing ClearList API routes for seller actions.
+ * 20 tools that wrap the existing ClearList API routes for seller actions.
  * Each tool is a thin adapter: validate input → call API → format response.
  *
  * Auth: All requests include the X-ClearList-API-Key header. The backend
@@ -699,6 +699,66 @@ export function registerSellerTools(
   // ─────────────────────────────────────────────────────────────────────────
   // 6. unpublish_page
   // ─────────────────────────────────────────────────────────────────────────
+  server.registerTool('extend_sale_page', {
+    title: 'Extend Sale Page',
+    description:
+      'Extend the life of the seller\'s sale page so it does not go offline. Sale pages expire — free pages after 30 days, paid pages when the pass ends — and once expired, anyone opening the link sees "This sale has ended". ' +
+      'On the FREE tier this adds 30 days at no cost during the final 7 days of the current cycle. ' +
+      'On an ACTIVE paid plan it returns checkout choices for time-only or a fresh full pass. An expired paid pass receives full-pass choices only. ' +
+      'Send the chosen checkout URL to the user, then poll check_tier_status to confirm. ' +
+      'Call check_tier_status first if you want to know how many days are left. Takes no arguments.',
+    inputSchema: {},
+    annotations: {
+      title: 'Extend Sale Page',
+      readOnlyHint: false,
+    },
+  }, async () => {
+    const result = await api.post<{
+      extended: boolean
+      requires_payment: boolean
+      page_expires_at: string | null
+      days_until_page_expiry: number | null
+      url?: string
+      options?: Array<Record<string, unknown>>
+    }>('/api/pages/extend')
+
+    if (!result.success || !result.data) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          error: result.error || 'Unknown error',
+          http_status: result.http_status,
+          message: 'Failed to extend the sale page',
+        }, null, 2) }],
+        isError: true,
+      }
+    }
+
+    // Paid plans branch: hand the human a link, exactly like generate_payment_link.
+    if (result.data.requires_payment) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          message: 'This account is on a paid plan, so extending is a purchase. Show the user these options and send them the checkout_url they pick.',
+          extended: false,
+          requires_payment: true,
+          page_expires_at: result.data.page_expires_at,
+          days_until_page_expiry: result.data.days_until_page_expiry,
+          options: result.data.options,
+          instructions: 'The user taps the link, pays in their browser, then comes back. Use check_tier_status to confirm the new expiry date. You must never ask the user for card, bank, or other payment details.',
+        }, null, 2) }],
+      }
+    }
+
+    return {
+      content: [{ type: 'text' as const, text: JSON.stringify({
+        message: 'Sale page extended. It is live again and buyers can reserve as normal.',
+        extended: true,
+        page_expires_at: result.data.page_expires_at,
+        days_until_page_expiry: result.data.days_until_page_expiry,
+        url: result.data.url,
+      }, null, 2) }],
+    }
+  })
+
   server.registerTool('unpublish_page', {
     title: 'Unpublish Sale Page',
     description:
@@ -1153,7 +1213,7 @@ export function registerSellerTools(
   server.registerTool('generate_payment_link', {
     title: 'Generate Payment Link',
     description:
-      'Generate a payment link for upgrading the seller\'s account. Send this link to the user — they tap it, pay in their browser, and come back. Two plans: "sale_pass" (Move Sale — $20, 50 items, 30 days) and "big_move" (Garage Sale — $39, 200 items, 60 days). Free tier: 3 items, always free (page expires every 30 days). Use check_tier_status first to see if an upgrade is needed.',
+      'Generate a payment link for upgrading the seller\'s account. Send this link to the user — they tap it, pay in their browser, and come back. Two plans: "sale_pass" (Move Sale — $20, 50 items, 30 days) and "big_move" (Garage Sale — $39, 200 items, 60 days). Free tier: 3 items, always free; use extend_sale_page for page renewal. Use check_tier_status first to see if an upgrade is needed.',
     inputSchema: {
       plan: z
         .enum(['sale_pass', 'big_move'])
@@ -1398,7 +1458,7 @@ export function registerSellerTools(
   })
 
   // ─────────────────────────────────────────────────────────────────────────
-  // 19. check_tier_status
+  // 20. check_tier_status
   // ─────────────────────────────────────────────────────────────────────────
   server.registerTool('check_tier_status', {
     title: 'Check Tier Status',
@@ -1436,7 +1496,7 @@ export function registerSellerTools(
     if (d.needs_upgrade) {
       summary = `Upgrade needed! ${d.items_remaining} item slots remaining (${d.items_count}/${d.items_limit}). Use generate_payment_link to get an upgrade URL.`
     } else if (d.tier === 'expired') {
-      summary = `Plan expired. Use generate_payment_link to renew.`
+      summary = `Plan expired. Use extend_sale_page to get the eligible renewal choices.`
     } else {
       summary = `${d.tier} tier — ${d.items_remaining} item slots available (${d.items_count}/${d.items_limit})`
     }
