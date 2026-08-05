@@ -38,6 +38,12 @@ export function registerOnboardingTools(
     annotations: {
       title: 'Send Verification Code',
       readOnlyHint: false,
+      // Delivers mail to an address the caller supplied — state change lands
+      // outside ClearList entirely.
+      openWorldHint: true,
+      // A sent email cannot be recalled. OpenAI's own worked example of a
+      // destructive side effect is "send messages ... that can't be undone".
+      destructiveHint: true,
     },
   }, async ({ email }) => {
     const result = await api.post('/api/auth/send-code', { email })
@@ -81,6 +87,12 @@ export function registerOnboardingTools(
     annotations: {
       title: 'Verify Code & Authenticate',
       readOnlyHint: false,
+      // Creates an account and mints an API key. Both are tenant-private; no
+      // publicly visible state changes, so this stays false despite being a write.
+      openWorldHint: false,
+      // Idempotent-ish and reversible: a fresh code can be requested, and the
+      // key can be revoked.
+      destructiveHint: false,
     },
   }, async ({ email, code }) => {
     const result = await api.post<{

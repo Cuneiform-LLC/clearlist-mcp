@@ -118,6 +118,10 @@ export function registerSellerTools(
     annotations: {
       title: 'Create Listing',
       readOnlyHint: false,
+      // Once the sale page is published, listing content is publicly readable.
+      openWorldHint: true,
+      // Purely additive.
+      destructiveHint: false,
     },
   }, async ({ photos, description, voice_transcription }) => {
     // Step 1: Upload photos to Firebase Storage
@@ -221,6 +225,9 @@ export function registerSellerTools(
     annotations: {
       title: 'Bulk Create Listings',
       readOnlyHint: false,
+      openWorldHint: true,
+      // Additive, same as create_listing — just many at once.
+      destructiveHint: false,
     },
   }, async ({ photos, seller_context }) => {
     // Step 1: Upload all photos to Firebase Storage
@@ -464,6 +471,13 @@ export function registerSellerTools(
     annotations: {
       title: 'Edit Listing',
       readOnlyHint: false,
+      openWorldHint: true,
+      // Deliberately false, though it overwrites fields with no version history.
+      // OpenAI lists "overwrite" under destructive, but an edit is the ordinary
+      // way to correct a listing: marking it destructive would put a red
+      // "cannot be undone" warning on the most routine action a seller takes.
+      // The irreversible operations here are delete_listing and the send tools.
+      destructiveHint: false,
     },
   }, async ({ item_id, ...updates }) => {
     const fields: Record<string, unknown> = {}
@@ -527,6 +541,9 @@ export function registerSellerTools(
     annotations: {
       title: 'Delete Listing',
       readOnlyHint: false,
+      // Removes the item from the public sale page.
+      openWorldHint: true,
+      // Soft-delete is restorable for 7 days, then permanent.
       destructiveHint: true,
     },
   }, async ({ item_id }) => {
@@ -592,6 +609,8 @@ export function registerSellerTools(
     annotations: {
       title: 'Restore Listing',
       readOnlyHint: false,
+      // Puts the item back on the public sale page.
+      openWorldHint: true,
       // Not destructive: this is the undo. Marking it destructive would make
       // cautious hosts gate the recovery path behind the same friction as the
       // deletion it reverses.
@@ -672,6 +691,10 @@ export function registerSellerTools(
     annotations: {
       title: 'Publish Sale Page',
       readOnlyHint: false,
+      // The whole point of the tool: makes a page publicly reachable.
+      openWorldHint: true,
+      // Reversible via unpublish_page.
+      destructiveHint: false,
     },
     _meta: UI_TOOL_META,
   }, async (args) => {
@@ -711,6 +734,9 @@ export function registerSellerTools(
     annotations: {
       title: 'Extend Sale Page',
       readOnlyHint: false,
+      // Keeps a public page live past its expiry date.
+      openWorldHint: true,
+      destructiveHint: false,
     },
   }, async () => {
     const result = await api.post<{
@@ -768,6 +794,13 @@ export function registerSellerTools(
     annotations: {
       title: 'Unpublish Sale Page',
       readOnlyHint: false,
+      // Takes a publicly reachable page offline.
+      openWorldHint: true,
+      // Deliberately false. It revokes public access, which brushes against
+      // OpenAI's "revoke access" wording, but publish_page restores it and no
+      // listing data is lost. The destructive flag is reserved here for things
+      // that cannot be walked back.
+      destructiveHint: false,
     },
   }, async () => {
     const result = await api.post('/api/pages/unpublish')
@@ -809,6 +842,9 @@ export function registerSellerTools(
     annotations: {
       title: 'Get Listings',
       readOnlyHint: true,
+      // Reads this seller's own items. Closed domain.
+      openWorldHint: false,
+      destructiveHint: false,
     },
     _meta: UI_TOOL_META,
   }, async ({ include_deleted }) => {
@@ -885,6 +921,8 @@ export function registerSellerTools(
     annotations: {
       title: 'Get Reservations',
       readOnlyHint: true,
+      openWorldHint: false,
+      destructiveHint: false,
     },
     _meta: UI_TOOL_META,
   }, async () => {
@@ -937,6 +975,8 @@ export function registerSellerTools(
     annotations: {
       title: 'Get Conversation',
       readOnlyHint: true,
+      openWorldHint: false,
+      destructiveHint: false,
     },
   }, async ({ conversation_id }) => {
     const result = await api.get(`/api/conversations/${conversation_id}`)
@@ -1025,6 +1065,13 @@ export function registerSellerTools(
     annotations: {
       title: 'Reply to Buyer',
       readOnlyHint: false,
+      // Sends a message to a third party outside ClearList.
+      openWorldHint: true,
+      // A sent buyer message cannot be recalled. This is OpenAI's own example
+      // of a destructive side effect, and it matters more here than elsewhere:
+      // reply_to_buyer takes free text, so a mistaken send is visible to a
+      // stranger. See the share_address block comment below.
+      destructiveHint: true,
     },
   }, async ({ conversation_id, message, message_type }) => {
     const result = await api.post(`/api/conversations/${conversation_id}`, {
@@ -1080,6 +1127,10 @@ export function registerSellerTools(
     annotations: {
       title: 'Mark as Picked Up',
       readOnlyHint: false,
+      // Flips the status badge buyers see on the public sale page.
+      openWorldHint: true,
+      // A status change, reversible via edit_listing.
+      destructiveHint: false,
     },
   }, async ({ item_id }) => {
     const result = await api.put(`/api/items/${item_id}`, {
@@ -1126,6 +1177,8 @@ export function registerSellerTools(
     annotations: {
       title: 'Get Page Stats',
       readOnlyHint: true,
+      openWorldHint: false,
+      destructiveHint: false,
     },
   }, async ({ slug }) => {
     const result = await api.get(`/api/pages/${slug}?stats_only=true`)
@@ -1185,6 +1238,12 @@ export function registerSellerTools(
     annotations: {
       title: 'Set Pickup Availability',
       readOnlyHint: false,
+      // False despite being a write, and it is the least obvious call in this
+      // file. It changes which slots a buyer is offered, but only on
+      // /reserve/schedule/[token], which is token-gated rather than public.
+      // Seller configuration, not published content.
+      openWorldHint: false,
+      destructiveHint: false,
     },
   }, async (args) => {
     const result = await api.put('/api/scheduling/availability', args)
@@ -1222,6 +1281,17 @@ export function registerSellerTools(
     annotations: {
       title: 'Generate Payment Link',
       readOnlyHint: true,
+      // readOnlyHint stays TRUE even though the handler below calls api.post.
+      // /api/payments/checkout-link does not create a Stripe session — it
+      // concatenates a pre-configured Stripe Payment Link with
+      // client_reference_id and returns it. That is "computes information and
+      // doesn't change anything" under OpenAI's definition. Do NOT flip this to
+      // false to make it agree with the HTTP verb; the verb is a published
+      // contract (public/.well-known/openapi.json). If that route is ever
+      // changed to actually create a session, flip this AND openWorldHint —
+      // src/__tests__/api/payments/checkout-link-readonly.test.ts fails first.
+      openWorldHint: false,
+      destructiveHint: false,
     },
   }, async ({ plan }) => {
     const result = await api.post<{
@@ -1282,6 +1352,10 @@ export function registerSellerTools(
     annotations: {
       title: 'Prepare Cross-Post',
       readOnlyHint: true,
+      // Returns listing text for the seller to paste elsewhere. It does not
+      // post anything itself, so nothing leaves ClearList here.
+      openWorldHint: false,
+      destructiveHint: false,
     },
   }, async ({ item_id }) => {
     const result = await api.get(`/api/crosspost/prepare?itemId=${item_id}`)
@@ -1318,6 +1392,12 @@ export function registerSellerTools(
     annotations: {
       title: 'Confirm Pickup',
       readOnlyHint: false,
+      // Flips item status to `taken` (publicly visible) AND emails the buyer
+      // via notifyBuyerPickupConfirmed / notifyBuyerQueueAdvanced.
+      openWorldHint: true,
+      // Those buyer emails cannot be recalled, and confirming a pickup can
+      // advance the queue for other buyers.
+      destructiveHint: true,
     },
   }, async ({ reservation_id }) => {
     // Authorized by the seller's own API key. The route accepts an
@@ -1417,6 +1497,8 @@ export function registerSellerTools(
     annotations: {
       title: 'Get Profile',
       readOnlyHint: true,
+      openWorldHint: false,
+      destructiveHint: false,
     },
   }, async () => {
     // Use check_tier_status endpoint for tier info
@@ -1468,6 +1550,8 @@ export function registerSellerTools(
     annotations: {
       title: 'Check Tier Status',
       readOnlyHint: true,
+      openWorldHint: false,
+      destructiveHint: false,
     },
   }, async () => {
     const result = await api.get<{

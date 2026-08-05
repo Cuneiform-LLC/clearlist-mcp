@@ -95,6 +95,9 @@ export function registerDiscoveryTools(
     annotations: {
       title: 'Search Items',
       readOnlyHint: true,
+      // Reads ClearList's own catalogue only — a closed domain, not a web search.
+      openWorldHint: false,
+      destructiveHint: false,
     },
   }, async (args) => {
     // Try the search API route (Phase 14)
@@ -143,6 +146,8 @@ export function registerDiscoveryTools(
     annotations: {
       title: 'Get Sales Near Location',
       readOnlyHint: true,
+      openWorldHint: false,
+      destructiveHint: false,
     },
   }, async (args) => {
     const params: Record<string, string> = { city: args.city }
@@ -181,6 +186,8 @@ export function registerDiscoveryTools(
     annotations: {
       title: 'Get City Sales',
       readOnlyHint: true,
+      openWorldHint: false,
+      destructiveHint: false,
     },
   }, async ({ city }) => {
     const result = await api.get('/api/cities/sales', { city })
