@@ -17,7 +17,7 @@ import { ClearListApiClient, type ApiResponse } from './api-client.js'
 const DEFAULT_API_URL = 'https://clearlist.me'
 const CONFIG_DIR = join(homedir(), '.clearlist')
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json')
-const CLI_VERSION = '0.6.1'
+const CLI_VERSION = '0.7.0'
 
 interface CliConfig {
   apiKey?: string
@@ -234,7 +234,13 @@ async function main(): Promise<void> {
     case 'publish': {
       const city = flags['city']
       if (!city) fail('Usage: clearlist publish --city <city> [--payment-instructions <text>]')
-      const body: Record<string, unknown> = { city }
+      // `publish: true` is the explicit re-publish intent, same as the
+      // publish_page MCP tool. Without it, `clearlist unpublish` followed by
+      // `clearlist publish --city X` prints success and a working-looking URL
+      // while the page stays offline forever — the route's already-has-slug
+      // branch updates location only. This is the CLI half of the same fix;
+      // missing it left the one-way door open in the same package.
+      const body: Record<string, unknown> = { city, publish: true }
       if (flags['payment-instructions']) body.payment_instructions = flags['payment-instructions']
       printResult(await makeClient(true).post('/api/pages/publish', body))
       return

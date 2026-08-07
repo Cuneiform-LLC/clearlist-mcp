@@ -21,6 +21,43 @@ const MAX_RETRIES = 3
 /** Backoff intervals in ms: 1s → 3s → 9s */
 const RETRY_BACKOFF_MS = [1000, 3000, 9000]
 
+/**
+ * Cap server-controlled text before it becomes part of a message an LLM reads.
+ *
+ * Whatever the API returns in `error` is interpolated into the string the MCP
+ * tool hands back, which lands in the context of an agent holding a live seller
+ * API key and tools like delete_listing and publish_page. Two reasons to bound
+ * it: a multi-megabyte error body would blow out that context (measured at 5MB
+ * against a hostile server), and a long free-text field is a comfortable place
+ * to hide instructions aimed at the agent rather than the user. Truncating does
+ * not make the text trustworthy — it makes it small and obviously quoted.
+ *
+ * The existing truncateBody() covers only UNPARSEABLE bodies; a well-formed
+ * JSON `error` field bypassed it entirely.
+ */
+const MAX_AGENT_VISIBLE_ERROR_CHARS = 500
+
+function truncateForAgent(text: unknown): string | undefined {
+  if (text === undefined || text === null || text === '') return undefined
+
+  // The parameter is typed `unknown`, not `string`, on purpose. Every value
+  // reaching here came out of JSON.parse on a SERVER response, so the compiler's
+  // guarantee stops at the network boundary — a route (or a proxy, or an error
+  // page rendered as JSON) answering `{"error": {"code": "...", "details": ...}}`
+  // hands us an object. That used to throw: `{}` is truthy, `({}).length` is
+  // undefined, `undefined <= 500` is false, so execution fell through to
+  // `.slice()` and raised `TypeError: text.slice is not a function` — INSIDE the
+  // error path, which destroys the original failure and replaces it with a
+  // confusing one. Found by review, not by a test; nothing in the suite feeds a
+  // non-string error because our own routes never send one.
+  const asString = typeof text === 'string' ? text : JSON.stringify(text)
+  if (!asString) return undefined
+
+  return asString.length <= MAX_AGENT_VISIBLE_ERROR_CHARS
+    ? asString
+    : `${asString.slice(0, MAX_AGENT_VISIBLE_ERROR_CHARS)}… (truncated from ${asString.length} chars)`
+}
+
 /** HTTP status codes that are safe to retry */
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 503])
 
@@ -325,6 +362,11 @@ export class ClearListApiClient {
     const startTime = Date.now()
     const timeoutMs = this.timeoutMs
     let pollCount = 0
+    // Did we ever successfully read a job status? Distinguishes "the job ran
+    // long" from "we never got an answer" in the timeout message below.
+    let sawProcessingStatus = false
+    let lastPollError: string | undefined
+    let unknownStatus: string | undefined
 
     while (Date.now() - startTime < timeoutMs) {
       // Sleep BEFORE every poll except the first. pollCount=0 → no delay,
@@ -361,6 +403,53 @@ export class ClearListApiClient {
         { timeoutMs: remainingMs, noRetryOnTimeout: true },
       )
 
+      // ── Terminal JOB outcomes are read BEFORE the transport-level `success`
+      // check, because a failed job is not a failed request.
+      //
+      // GET /api/ai-jobs/{id} reports a failed job as HTTP **200** with
+      // `{ success: false, status: 'failed', error, error_category }`
+      // (ai-jobs/[jobId]/route.ts:43-50), and the server's own TTL expiry uses
+      // the same shape. `success: false` with no `http_status` (it was a 200)
+      // therefore fell into the transient branch below and `continue`d, so the
+      // `status === 'failed'` check that used to live after it was unreachable
+      // for every real failure. A prohibited-content rejection, an unparseable
+      // model response or a server-side timeout all spun for the full 120s and
+      // then reported "AI job timed out" — hiding an actionable reason behind a
+      // misleading one.
+      //
+      // Found in review 2026-08-05, immediately after fixing the sibling
+      // envelope-depth bug in this same loop, and initially missed because the
+      // new test mocked a failed job as `success: true` — the same
+      // test-agrees-with-the-bug trap that let the first one ship.
+      if (result.status === 'failed') {
+        // Bounded like every other server-controlled string that reaches an
+        // agent's context. This one and the terminal-4xx return below were the
+        // two paths MAX_AGENT_VISIBLE_ERROR_CHARS was written for and did not
+        // cover — they were bounded only by our own routes happening to send
+        // short messages, which is not a guarantee about a server we do not
+        // control.
+        return { success: false, error: truncateForAgent(result.error) || 'AI generation failed' }
+      }
+
+      if (result.status === 'completed') {
+        // A completed job with no `data` key is terminal, not transient.
+        // JSON.stringify omits an undefined `job.result`, so such a response
+        // used to match none of these branches, fall past the `!result.success`
+        // check (success is true), and spin to the timeout — then report
+        // "status could not be read", blaming infrastructure for a job that
+        // answered every single poll. Say what actually happened instead.
+        if (!('data' in result)) {
+          return { success: false, error: 'AI job completed but returned no result' }
+        }
+        return { success: true, data: result.data as T }
+      }
+
+      // The ONLY write that matters. Both branches above return, so the loop
+      // can only fall through to the timeout after seeing 'processing' —
+      // earlier versions also set the flag on those two paths, which was dead
+      // and implied a broader "did we see any status" meaning than it has.
+      if (result.status === 'processing') sawProcessingStatus = true
+
       if (!result.success) {
         // Distinguish terminal errors (auth/not-found) from transient ones
         // (network blip, timeout, 5xx). Without this, an expired API key or
@@ -395,33 +484,85 @@ export class ClearListApiClient {
           // result is ApiResponse<Record<string, unknown>> but we return
           // ApiResponse<T>. Since success is false, data is unused —
           // construct a minimal failure response in the caller's T.
-          return { success: false, error: result.error, http_status: status }
+          return { success: false, error: truncateForAgent(result.error), http_status: status }
         }
-        // Network errors, 5xx, and unrecognized errors are transient — keep trying
+        // Network errors, 5xx, and unrecognized errors are transient — keep
+        // trying, but remember why, so a run that never gets an answer can say
+        // so instead of blaming AI latency.
+        lastPollError = truncateForAgent(result.error)
         continue
       }
 
-      const data = result.data
-      if (!data) continue
-
-      // Use property-presence check instead of truthiness: a successful
-      // job that returns `0`, `false`, or `""` as its data payload should
-      // exit the loop, not spin until the 120s timeout. Gemini round-6 P2.
-      if (data.status === 'completed' && 'data' in data) {
-        return { success: true, data: data.data as T }
+      // A SUCCESSFUL poll whose status we don't recognise.
+      //
+      // 'completed', 'failed' and 'processing' all returned or continued above,
+      // so anything else lands here. It used to fall through silently and spin
+      // to the timeout, then report "every poll failed" — an actively false
+      // diagnostic, since every poll succeeded. 'queued' is the obvious future
+      // addition to a job queue, and adding it server-side would have broken
+      // every deployed client with a message blaming the network.
+      //
+      // Keep polling (an unknown status is more likely a new in-progress state
+      // than a terminal one) but record it, so the timeout says what we saw.
+      if (result.status !== 'processing') {
+        unknownStatus = String(result.status)
       }
-
-      if (data.status === 'failed') {
-        return {
-          success: false,
-          error: (data.error as string) || 'AI generation failed',
-        }
-      }
-
-      // Still processing — continue polling
     }
 
-    return { success: false, error: `AI job timed out after ${timeoutMs}ms` }
+    // Two very different failures used to share this one sentence.
+    //
+    // Reaching here means the budget expired. Either the job really did stay
+    // 'processing' the whole time (slow generation), or every poll failed
+    // transiently and we never learned anything at all (network down, 5xx
+    // storm) — an infrastructure problem wearing an AI-latency costume.
+    // `sawProcessingStatus` separates them so an agent, and whoever reads the log, is
+    // pointed at the right thing.
+    if (sawProcessingStatus) {
+      // Hand back the job_id, because this "timeout" is usually not a failure.
+      //
+      // The server budgets a generation at 240s (bulk-generate's
+      // GENERATION_BUDGET_MS) inside maxDuration 300. This client gives up at
+      // 120s. Every generation landing in that 120-240s window — a duration
+      // the SERVER treats as normal — is reported to the agent as a failure
+      // while it completes fine, stays in ai_jobs for 15 minutes, and is
+      // billed. Without the id, the agent's only recovery is a fresh
+      // create_listing: another generation, another bill, another coin flip.
+      // With it, the agent can poll /api/ai-jobs/{id} and collect the result
+      // it already paid for.
+      // Say what the AGENT can actually do. An earlier draft told it to poll
+      // GET /api/ai-jobs/{id}; no registered tool wraps that route, and over
+      // the hosted transport the agent holds an OAuth credential rather than
+      // an API key, so it cannot call it out of band either. Advice that
+      // cannot be followed is worse than none: a compliant agent stops, and
+      // the seller ends up with no listing at all.
+      //
+      // What is TRUE here: this timeout fires while polling the generation,
+      // which is step two of create_listing's four — the save has not happened
+      // yet. So nothing was created, and retrying CANNOT duplicate a listing.
+      // It does start a second generation and bill for it, which is worth
+      // saying plainly so the agent tells the seller rather than looping.
+      // The id is returned for logs and for a human debugging the run.
+      return {
+        success: false,
+        error:
+          `AI job ${jobId} did not finish within this client's ${timeoutMs}ms budget. ` +
+          `The server allows longer, so it may still be completing — but nothing was ` +
+          `saved yet, so no listing exists and NOTHING WILL BE DUPLICATED by trying ` +
+          `again. Retrying starts a fresh generation and bills for it: do it once, ` +
+          `tell the user it is taking longer than usual, and stop if it fails twice.`,
+        job_id: jobId,
+      }
+    }
+    if (unknownStatus) {
+      return {
+        success: false,
+        error: `AI job reported an unrecognised status ("${truncateForAgent(unknownStatus)}") for ${timeoutMs}ms. This client understands processing, completed and failed — it may be out of date with the server.`,
+      }
+    }
+    return {
+      success: false,
+      error: `AI job status could not be read for ${timeoutMs}ms — every poll failed. Last error: ${lastPollError || 'unknown'}`,
+    }
   }
 
   /**
@@ -463,6 +604,30 @@ export class ClearListApiClient {
     const callTimeoutMs = opts?.timeoutMs ?? this.timeoutMs
     const retryOnTimeout = !opts?.noRetryOnTimeout
 
+    // A DEADLINE for the whole call, not a fresh timeout per attempt.
+    //
+    // The comment above describes exactly this bug and fixes only half of it.
+    // `noRetryOnTimeout` suppresses the retry-on-AbortError path, but the
+    // RETRYABLE_STATUS_CODES path below (429/500/503) was untouched, and each
+    // attempt armed a NEW AbortController with the FULL budget. A backend
+    // answering 503 slowly therefore burned 4 x callTimeoutMs plus backoff —
+    // roughly 8 minutes against a "120 second" budget, twice as bad as the
+    // 240s case that prompted the original fix.
+    //
+    // This matters now in a way it did not before: pollJob was unreachable
+    // until the fix in this same release, and the hosted transport at
+    // /api/mcp runs with maxDuration = 300s (raised from 150 once the four-call
+    // chain was accounted for). An overshoot there is not a slow
+    // response, it is a Vercel kill mid-listing with no diagnostic.
+    const deadline = Date.now() + callTimeoutMs
+
+    // Why the last retryable attempt failed, so a deadline bail can name the
+    // upstream cause ("upstream unavailable") instead of only reporting that
+    // time ran out. Without this the deadline turns every slow-5xx storm into
+    // a bare timeout, which is the same "infrastructure problem wearing an
+    // AI-latency costume" that pollJob's sawProcessingStatus exists to prevent.
+    let lastRetryableError: string | undefined
+
     // Build headers safely — init.headers could be a Headers instance,
     // an array of tuples, or a plain Record. Handle all three.
     const headers: Record<string, string> = {}
@@ -486,9 +651,21 @@ export class ClearListApiClient {
 
     // Retry loop with exponential backoff for transient errors
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-      // Abort after timeout to avoid hanging on slow/dead backends
+      // Abort after timeout to avoid hanging on slow/dead backends. Bounded by
+      // the REMAINING budget so retries can never extend the total past it.
+      const remainingMs = deadline - Date.now()
+      if (remainingMs <= 0) {
+        // Same "timed out" wording as the AbortError path below: to a caller
+        // these are one condition (the budget is gone), and only the reason
+        // differs. Tools and tests branch on that phrase.
+        const base = `Request timed out after ${callTimeoutMs}ms (${attempt} attempt(s))`
+        return {
+          success: false,
+          error: lastRetryableError ? `${base}. Last upstream error: ${lastRetryableError}` : base,
+        }
+      }
       const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), callTimeoutMs)
+      const timeoutId = setTimeout(() => controller.abort(), remainingMs)
 
       try {
         const response = await fetch(url, {
@@ -499,7 +676,27 @@ export class ClearListApiClient {
 
         // Check if this is a retryable HTTP error
         if (RETRYABLE_STATUS_CODES.has(response.status) && attempt < MAX_RETRIES) {
-          const backoff = RETRY_BACKOFF_MS[attempt] || RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1]
+          // Best-effort read of WHY, purely for diagnostics — a failure to read
+          // or parse it must not change the retry decision, so it falls back to
+          // the bare status.
+          lastRetryableError = await response
+            .text()
+            .then((text) => {
+              try {
+                const parsed = JSON.parse(text) as { error?: string }
+                return truncateForAgent(parsed.error) || `HTTP ${response.status}`
+              } catch {
+                return `HTTP ${response.status}`
+              }
+            })
+            .catch(() => `HTTP ${response.status}`)
+
+          // Backoff is capped by the remaining budget too, so sleeping cannot
+          // be what pushes the call past its deadline.
+          const backoff = Math.min(
+            RETRY_BACKOFF_MS[attempt] || RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1],
+            Math.max(0, deadline - Date.now()),
+          )
           console.warn(`[MCP] HTTP ${response.status} from ${url}, retry ${attempt + 1}/${MAX_RETRIES} in ${backoff}ms`)
           await new Promise((resolve) => setTimeout(resolve, backoff))
           continue
@@ -545,7 +742,10 @@ export class ClearListApiClient {
           (json as { code?: string }).code === 'idempotency_conflict' &&
           attempt < MAX_RETRIES
         ) {
-          const backoff = RETRY_BACKOFF_MS[attempt] || RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1]
+          const backoff = Math.min(
+            RETRY_BACKOFF_MS[attempt] || RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1],
+            Math.max(0, deadline - Date.now()),
+          )
           console.warn(`[MCP] idempotency conflict on ${url}, retry ${attempt + 1}/${MAX_RETRIES} in ${backoff}ms`)
           await new Promise((resolve) => setTimeout(resolve, backoff))
           continue
@@ -578,7 +778,10 @@ export class ClearListApiClient {
 
         // Network errors: retry if attempts remain
         if (attempt < MAX_RETRIES) {
-          const backoff = RETRY_BACKOFF_MS[attempt] || RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1]
+          const backoff = Math.min(
+            RETRY_BACKOFF_MS[attempt] || RETRY_BACKOFF_MS[RETRY_BACKOFF_MS.length - 1],
+            Math.max(0, deadline - Date.now()),
+          )
           console.warn(`[MCP] Network error from ${url}: ${err instanceof Error ? err.message : err}, retry ${attempt + 1}/${MAX_RETRIES} in ${backoff}ms`)
           await new Promise((resolve) => setTimeout(resolve, backoff))
           continue

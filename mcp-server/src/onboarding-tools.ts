@@ -16,7 +16,7 @@
 
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import type { ClearListApiClient } from './api-client.js'
+import type { ClearListApiClient, ApiResponse } from './api-client.js'
 
 export function registerOnboardingTools(
   server: McpServer,
@@ -95,38 +95,102 @@ export function registerOnboardingTools(
       destructiveHint: false,
     },
   }, async ({ email, code }) => {
-    const result = await api.post<{
-      customToken: string
-      isNewUser: boolean
-      uid: string
-      apiKey?: string
-    }>('/api/auth/verify-code', {
+    /**
+     * `/api/auth/verify-code` answers FLAT, not wrapped in `data`.
+     *
+     *   { success: true, customToken, isNewUser, uid, apiKey }
+     *
+     * Most routes here return `{ success, data }`, and this tool used to read
+     * `result.data` accordingly — which is always undefined against this route,
+     * so EVERY agent onboarding failed with "Verification succeeded but the
+     * server returned no data", while the server had in fact created the
+     * account and minted a key. The agent then retried and minted another.
+     * Found 2026-08-06 by the E2E harness on its first run: two api_keys
+     * existed for an account whose onboarding had "failed" twice.
+     *
+     * The flat shape is not a bug to fix in the route — the web client reads
+     * `data.customToken` off it directly (src/lib/firebase/auth.ts), so it is a
+     * published contract. The adapter is what has to bend.
+     *
+     * Same class as the pollJob defect in api-client.ts: reading the payload
+     * one level deeper than the route actually returns it.
+     */
+    const result = await api.post<never>('/api/auth/verify-code', {
       email,
       code,
       agent: true, // Tells the backend to auto-generate an API key
-    })
+    }) as ApiResponse<never> & {
+      customToken?: string
+      isNewUser?: boolean
+      uid?: string
+      apiKey?: string
+    }
 
     if (!result.success) {
+      // "No verification code found" after an apparently-failed attempt is the
+      // one failure that must NOT be retried, and the old copy told the agent
+      // to retry it. api-client retries POST on a network error or 5xx, and
+      // /api/auth/verify-code is not idempotency-wrapped, so attempt one can
+      // succeed server-side — consuming the code, creating the account, minting
+      // a key — and lose the response in flight. The retry then finds the code
+      // gone and reports "wrong code". An agent following the old advice sends
+      // a new code and onboards again, leaving a live 30-day credential the
+      // seller does not know exists. Detected by the message because the route
+      // emits no machine-readable code for it.
+      // Matched on the ONE message that means it, and nothing else.
+      //
+      // This alternation originally also carried `request a new one`, which is
+      // shared prose: `Code expired. Please request a new one.` (route.ts:160)
+      // matched it too. Codes expire after ten minutes, and this is the grandma
+      // flow — the agent sends a code, the human goes to find their phone and
+      // read six digits back. Crossing ten minutes is the NORMAL failure, and
+      // the branch below tells the agent not to send a new code, which is the
+      // only thing that fixes it. An expired code must fall through to the
+      // default advice.
+      const codeMissing = /no verification code found/i.test(result.error ?? '')
+      const rateLimited = result.http_status === 429
       return {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
             error: result.error || 'Unknown error',
-            message: 'Verification failed. Ask the user to double-check the code. Max 5 attempts per code — if all fail, call send_verification_code for a new one.',
+            http_status: result.http_status,
+            message: codeMissing
+              ? 'The code is no longer on file. This does NOT necessarily mean it was wrong: if an earlier attempt reached the server and its reply was lost, that attempt already consumed the code, created the account, and minted an API key. Do NOT call send_verification_code and start over — that mints a SECOND key the user never sees. Ask the user whether they can already sign in, or report this and stop.'
+              : rateLimited
+                // Two unrelated 429s share this status. The per-IP throttle
+                // (15 per 10 minutes) clears on its own; the signup-velocity
+                // ceiling can hold for up to an hour and, because the code is
+                // consumed BEFORE that check runs, a retry lands on "no
+                // verification code found" — the branch above, which says stop.
+                // So the guidance here is start-over-later, not retry-this-code.
+                // Do NOT claim attempts extend the window: the reset time is
+                // fixed when the window opens, and an over-limit call is not
+                // even counted.
+                ? 'Rate limited. The code (if any) is spent, so retrying THIS code will not work. Tell the user to wait — a few minutes for an ordinary throttle, up to an hour if the server mentioned high signup volume — then start again with send_verification_code. Do not loop in the meantime.'
+                : 'Verification failed. Ask the user to double-check the code. Codes expire after 10 minutes and allow 5 attempts — if it expired or all attempts failed, call send_verification_code for a fresh one.',
+            retryable: !codeMissing && !rateLimited,
           }, null, 2),
         }],
         isError: true,
       }
     }
 
-    const data = result.data
-    if (!data) {
+    // Read off `result` itself — see the flat-shape note above. The check is on
+    // apiKey rather than on the object, because an onboarding that returns no
+    // key is useless to the agent even though everything else "succeeded", and
+    // that is the failure worth naming.
+    const data = result
+    if (!data.apiKey) {
       return {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            error: 'No data returned',
-            message: 'Verification succeeded but the server returned no data. This is unexpected — try again.',
+            error: 'No API key returned',
+            message:
+              'Verification succeeded but no API key came back, so no further tools can be used. ' +
+              'The account may still have been created — do NOT loop on verify_code, each retry ' +
+              'mints another key. Report this rather than retrying.',
           }, null, 2),
         }],
         isError: true,

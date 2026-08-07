@@ -293,6 +293,13 @@ export function registerSellerTools(
             : null
 
           if (!listing) {
+            // Forward WHY it failed. This object dropped `genResult.error`
+            // entirely, so a whole group could fail and the agent saw only
+            // `status: 'failed'` next to a label — nothing to tell the seller,
+            // and no way to distinguish a slow generation (retry once, nothing
+            // duplicates) from a prohibited item or a dead key (retrying is
+            // pointless). In a 50-photo batch that is the difference between
+            // "three of your items need another pass" and silence.
             return {
               group_label: group.label,
               photo_count: group.photo_indices.length,
@@ -305,6 +312,8 @@ export function registerSellerTools(
               qa: null,
               inactive: false,
               status: 'failed' as const,
+              error: genResult.error ?? 'Generation returned no listing.',
+              ...(genResult.job_id ? { job_id: genResult.job_id } : {}),
             }
           }
 
@@ -698,7 +707,15 @@ export function registerSellerTools(
     },
     _meta: UI_TOOL_META,
   }, async (args) => {
-    const result = await api.post<{ slug: string; url: string }>('/api/pages/publish', args)
+    // `publish: true` is the explicit re-publish intent. This tool always means
+    // "publish", and without the flag a page that had been unpublished stayed
+    // offline while this returned "Sale page published!" with a working-looking
+    // URL — the route's already-has-slug branch updates location only. See the
+    // re-publish block in src/app/api/pages/publish/route.ts.
+    const result = await api.post<{ slug: string; url: string }>('/api/pages/publish', {
+      ...args,
+      publish: true,
+    })
 
     if (!result.success) {
       return {
@@ -944,6 +961,20 @@ export function registerSellerTools(
           total: conversations.length,
           reservations: conversations.map((conv) => ({
             conversation_id: conv.conversation_id,
+            // Both added 2026-08-05, and both were already present on the API
+            // response — this mapping simply dropped them.
+            //
+            // reservation_id: confirm_pickup REQUIRES it and its own description
+            // says "use get_reservations first to find the reservation
+            // details". It wasn't here and isn't inside `conv.reservation`
+            // either, so an agent following the documented workflow could not
+            // confirm a pickup at all; it had to know to call get_conversation
+            // as well.
+            //
+            // queue_position: this tool's description promises "queue
+            // positions" and then never returned one.
+            reservation_id: conv.reservation_id,
+            queue_position: conv.queue_position,
             buyer_email: conv.buyer_email,
             buyer_name: conv.buyer_name,
             unread_messages: conv.unread_count_seller,
@@ -1207,12 +1238,25 @@ export function registerSellerTools(
   server.registerTool('set_availability', {
     title: 'Set Pickup Availability',
     description:
-      'Configure pickup scheduling. Set weekly time windows when buyers can schedule pickups. Time format: "HH:mm" (24h). Days: "monday" through "sunday".',
+      'Configure pickup scheduling. Set weekly time windows when buyers can schedule pickups. Time format: "HH:mm" (24h). Days: "monday" through "sunday". ' +
+      'When turning scheduling ON for the first time you MUST also pass scheduling_timezone (IANA, e.g. "America/Chicago") — ask the seller which timezone their pickup times are in, or infer it from the city on their sale page.',
     inputSchema: {
       scheduling_enabled: z
         .boolean()
         .optional()
         .describe('Enable or disable pickup scheduling'),
+      // Added 2026-08-05. Its absence made this tool unable to perform its
+      // headline function: PUT /api/scheduling/availability refuses
+      // scheduling_enabled:true unless a timezone is set (route.ts:200), and the
+      // web UI satisfies that by auto-detecting from the browser — which an
+      // agent has no way to do. Worse, zod strips unknown keys, so an agent that
+      // correctly guessed `scheduling_timezone` had it silently removed before
+      // the request and got the same refusal. Scheduling was unreachable over
+      // MCP entirely.
+      scheduling_timezone: z
+        .string()
+        .optional()
+        .describe('IANA timezone ID for the pickup windows, e.g. "America/Chicago". REQUIRED the first time scheduling_enabled is set to true.'),
       slot_duration: z
         .union([z.literal(30), z.literal(60)])
         .optional()
@@ -1246,6 +1290,29 @@ export function registerSellerTools(
       destructiveHint: false,
     },
   }, async (args) => {
+    // Refuse a no-op instead of congratulating the caller on it.
+    //
+    // zod STRIPS unknown keys rather than rejecting them, so a plausible-looking
+    // call with the wrong parameter names — `{enabled, windows}` instead of
+    // `{scheduling_enabled, manual_availability}`, which is exactly what an LLM
+    // guesses — arrived here as `{}`, wrote nothing, and returned "Availability
+    // updated successfully". The seller is then told pickup scheduling is
+    // configured while buyers never see a "Schedule Pickup" button, and nobody
+    // finds out until bookings never arrive.
+    if (Object.keys(args).length === 0) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            error: 'NO_FIELDS_APPLIED',
+            message:
+              'Nothing was changed: no recognised fields were supplied. Valid fields are scheduling_enabled, scheduling_timezone, slot_duration, manual_availability, blocked_dates. Note manual_availability entries use day_of_week / start_time / end_time.',
+          }, null, 2),
+        }],
+        isError: true,
+      }
+    }
+
     const result = await api.put('/api/scheduling/availability', args)
 
     if (!result.success) {
@@ -1255,12 +1322,34 @@ export function registerSellerTools(
       }
     }
 
+    // Read back the REAL state rather than echoing the write response, which
+    // returns only the fields it happened to touch. An agent (and the seller
+    // reading over its shoulder) should be able to see whether scheduling is
+    // actually on and which windows actually stuck.
+    const current = await api.get('/api/scheduling/availability')
+
+    // If the read-back failed, SAY SO rather than passing off the write echo
+    // as current state. PUT returns only the fields this call touched
+    // (scheduling/availability/route.ts:212), so a caller that changed just
+    // slot_duration would otherwise see a `config` with no manual_availability
+    // and could reasonably conclude the seller's windows had been cleared.
+    // Flagged in review: a graceful-looking fallback that hides the failure is
+    // the same shape of bug as the unconditional success message above.
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
-          message: 'Availability updated successfully',
-          config: result.data,
+          message: 'Availability updated',
+          fields_applied: Object.keys(args),
+          config: current.success ? current.data : result.data,
+          ...(current.success
+            ? {}
+            : {
+                read_back_failed: true,
+                config_source: 'partial_write_echo',
+                read_back_error: current.error || 'Could not re-read availability after the write.',
+                warning: 'The write succeeded, but `config` above reflects ONLY the fields this call changed — it is not the seller\'s full current availability. Do not infer that absent fields are unset.',
+              }),
         }, null, 2),
       }],
     }
@@ -1272,11 +1361,19 @@ export function registerSellerTools(
   server.registerTool('generate_payment_link', {
     title: 'Generate Payment Link',
     description:
-      'Generate a payment link for upgrading the seller\'s account. Send this link to the user — they tap it, pay in their browser, and come back. Two plans: "sale_pass" (Move Sale — $20, 50 items, 30 days) and "big_move" (Garage Sale — $39, 200 items, 60 days). Free tier: 3 items, always free; use extend_sale_page for page renewal. Use check_tier_status first to see if an upgrade is needed.',
+      'Generate a payment link for upgrading the seller\'s account. Send this link to the user — they tap it, pay in their browser, and come back. Two plans: "sale_pass" (Move Sale — $20, 50 items, 30 days) and "big_move" (Garage Sale — $39, 200 items, 60 days). Free tier: 3 items, always free; use extend_sale_page for page renewal. Use check_tier_status first to see if an upgrade is needed. ' +
+      'If the seller has a discount code, pass it as promo_code and it will be pre-filled on the checkout page so they do not have to type it. ' +
+      'Say "pre-filled", not "applied": ClearList does not verify the code with Stripe, and an expired, inactive or fully-redeemed code is silently ignored at checkout, showing full price. Tell the seller to check the total before paying.',
     inputSchema: {
       plan: z
         .enum(['sale_pass', 'big_move'])
         .describe('Plan to upgrade to: "sale_pass" ($20) or "big_move" ($39)'),
+      promo_code: z
+        .string()
+        .optional()
+        .describe(
+          'Optional discount code the seller was given. Pass it EXACTLY as written, including capitalisation — Stripe matches the code as stored, so "THENIGHTETERNAL" is rejected where "TheNightEternal" is accepted. Letters, numbers, hyphens and underscores only.',
+        ),
     },
     annotations: {
       title: 'Generate Payment Link',
@@ -1293,7 +1390,7 @@ export function registerSellerTools(
       openWorldHint: false,
       destructiveHint: false,
     },
-  }, async ({ plan }) => {
+  }, async ({ plan, promo_code }) => {
     const result = await api.post<{
       checkout_url: string
       plan: string
@@ -1302,7 +1399,13 @@ export function registerSellerTools(
       duration_days: number
       already_paid?: boolean
       message: string
-    }>('/api/payments/checkout-link', { plan })
+    }>('/api/payments/checkout-link', {
+      plan,
+      // Only sent when present. zod strips unknown keys, so a misspelled
+      // parameter name would vanish silently — see the set_availability note in
+      // CLAUDE.md for the same trap.
+      ...(promo_code ? { promo_code } : {}),
+    })
 
     if (!result.success || !result.data) {
       return {
@@ -1333,6 +1436,19 @@ export function registerSellerTools(
           plan_name: result.data.plan_name,
           items_limit: result.data.items_limit,
           duration_days: result.data.duration_days,
+          // Echoed as UNVERIFIED on purpose. The route validates the code's
+          // characters and pre-fills it; nothing asks Stripe whether it exists,
+          // is active, or has redemptions left, and Stripe silently ignores a
+          // bad one and charges full price. An agent that says "the discount is
+          // applied" is guessing, and the seller finds out by being charged.
+          ...(promo_code
+            ? {
+                promo_code_prefilled: promo_code,
+                promo_code_verified: false,
+                promo_code_note:
+                  'This code was pre-filled on the checkout page but NOT verified with Stripe. Tell the seller to confirm the discounted total before paying; if it shows full price the code is expired, inactive, or fully redeemed.',
+              }
+            : {}),
           instructions: 'The user taps the link, pays in their browser, then comes back. Use check_tier_status to confirm the upgrade completed.',
         }, null, 2),
       }],
@@ -1516,7 +1632,32 @@ export function registerSellerTools(
     const listingsResult = await api.get('/api/items')
 
     // Combine the data
-    const tierData = tierResult.success ? tierResult.data : null
+    // Do NOT fall back to free-tier defaults on failure.
+    //
+    // This used to be `tierData?.tier || 'free'` with no success check anywhere
+    // and no isError, so when BOTH calls failed — an expired API key is the
+    // obvious way, and this tool's whole job is to confirm which account the
+    // agent is on — it still returned a fully-populated, entirely plausible
+    // object: tier "free", 0 items, limit 3. Indistinguishable from a genuine
+    // new free account. A seller on a paid plan whose key had expired would be
+    // told by their agent that they have no listings and are on the free tier,
+    // contradicting check_tier_status, which does check success.
+    //
+    // Tier is the substance of this tool, so a tier failure is a tool failure.
+    if (!tierResult.success) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            error: tierResult.error || 'Unknown error',
+            message: 'Could not read the account profile. This is NOT a free-tier account — the tier is unknown. An expired or invalid API key is the most likely cause.',
+          }, null, 2),
+        }],
+        isError: true,
+      }
+    }
+
+    const tierData = tierResult.data
     const items = listingsResult.success
       ? (listingsResult.data as Array<Record<string, unknown>> || [])
       : []
@@ -1525,15 +1666,23 @@ export function registerSellerTools(
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
-          tier: tierData?.tier || 'free',
-          paid_plan: tierData?.paid_plan || null,
-          items_count: tierData?.items_count || 0,
-          items_limit: tierData?.items_limit || 3,
-          items_remaining: tierData?.items_remaining || 0,
-          expires_at: tierData?.expires_at || null,
-          is_expired: tierData?.is_expired || false,
-          total_listings: items.length,
-          active_listings: items.filter((i) => i.status === 'available').length,
+          tier: tierData?.tier ?? null,
+          paid_plan: tierData?.paid_plan ?? null,
+          items_count: tierData?.items_count ?? null,
+          items_limit: tierData?.items_limit ?? null,
+          items_remaining: tierData?.items_remaining ?? null,
+          expires_at: tierData?.expires_at ?? null,
+          is_expired: tierData?.is_expired ?? null,
+          // Listings are secondary — report the counts as unknown rather than
+          // as zero when that call alone failed, so "no listings" is never
+          // fabricated from an error.
+          total_listings: listingsResult.success ? items.length : null,
+          active_listings: listingsResult.success
+            ? items.filter((i) => i.status === 'available').length
+            : null,
+          ...(listingsResult.success
+            ? {}
+            : { listings_error: listingsResult.error || 'Could not read listings; counts above are unknown, not zero.' }),
         }, null, 2),
       }],
     }

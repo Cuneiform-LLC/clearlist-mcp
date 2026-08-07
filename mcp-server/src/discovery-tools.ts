@@ -37,6 +37,25 @@ import type { ApiResponse, ClearListApiClient } from './api-client.js'
  */
 function isPhase14NotDeployed(result: ApiResponse<unknown>): boolean {
   if (result.http_status !== 404) return false
+
+  // PRIMARY SIGNAL, added 2026-08-05. The app has a custom JSON 404 handler for
+  // unmatched /api/* paths which labels itself:
+  //
+  //   { success:false, error:"Not Found", code:"route_not_found", message:"No
+  //     API route matches GET /api/search/items.", … }
+  //
+  // request() spreads the whole body onto the response, so `code` survives even
+  // though it is not on the ApiResponse type — hence the cast.
+  //
+  // Everything below this was written for Next.js's DEFAULT HTML 404 page and
+  // therefore never matched in production: the body is JSON, `error` is the
+  // non-empty string "Not Found", and nothing synthesizes an "HTTP 404" prefix.
+  // So all three discovery tools fell through to the generic BACKEND_ERROR
+  // branch and reported `{"error":"BACKEND_ERROR","message":"Not Found"}` —
+  // indistinguishable from a broken backend, and the exact opposite of what the
+  // directory submission promises reviewers they will see.
+  if ((result as { code?: string }).code === 'route_not_found') return true
+
   const error = (result.error || '').trim()
   // Empty error → synthesized by request() when no body
   if (!error) return true
