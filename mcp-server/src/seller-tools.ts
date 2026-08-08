@@ -98,7 +98,12 @@ export function registerSellerTools(
   server.registerTool('create_listing', {
     title: 'Create Listing',
     description:
-      'Send photos of a single item and get an AI-generated listing (Gemini 3.0 Pro) with title, description, price, dimensions, weight, and transport notes. The listing is saved to the seller\'s account. For multiple items at once, use bulk_create_listings instead. ' +
+      // No model name here on purpose. This said "Gemini 3.0 Pro" while the
+      // configured model was gemini-3.6-flash — a string that ships verbatim in
+      // the public npm package and renders in host UIs. Naming the model in
+      // prose recreates, by hand, exactly the drift src/lib/ai/models.ts exists
+      // to centralise away.
+      'Send photos of a single item and get an AI-generated listing with title, description, price, dimensions, weight, and transport notes. The listing is saved to the seller\'s account. For multiple items at once, use bulk_create_listings instead. ' +
       'Example: { photos: ["data:image/jpeg;base64,..."], description: "Vintage wooden desk, some scratches on top" }',
     inputSchema: {
       photos: z
@@ -209,7 +214,8 @@ export function registerSellerTools(
   server.registerTool('bulk_create_listings', {
     title: 'Bulk Create Listings',
     description:
-      'Send many photos at once (up to 50). AI automatically groups them by item (detecting multiple angles of the same thing), generates listings with Gemini 3.0 Pro, researches market prices with Google Search grounding, and validates with QA. Returns all detected items with listings and pricing. This is the most efficient way to list multiple items. ' +
+      // Model name deliberately omitted — see the note on create_listing above.
+      'Send many photos at once (up to 50). AI automatically groups them by item (detecting multiple angles of the same thing), generates the listings, researches market prices with Google Search grounding, and validates with QA. Returns all detected items with listings and pricing. This is the most efficient way to list multiple items. ' +
       'Example: { photos: ["data:image/jpeg;base64,...", "...up to 50"], seller_context: "Moving out of 2BR apartment, furniture is mostly IKEA" }',
     inputSchema: {
       photos: z
@@ -678,6 +684,7 @@ export function registerSellerTools(
     title: 'Publish Sale Page',
     description:
       'Publish the seller\'s sale page. Requires city. Returns the shareable URL (e.g., clearlist.me/sarahs-stuff). Items are immediately visible to buyers. ' +
+      'On an already-established page the publish still succeeds even if payment_instructions or custom_url cannot be applied — check payment_instructions_applied and custom_url_applied in the response and relay their messages instead of reporting plain success. ' +
       'Example: { city: "Austin", payment_instructions: "Venmo or cash at pickup" }',
     inputSchema: {
       city: z.string().describe('City name (required)'),
@@ -712,7 +719,21 @@ export function registerSellerTools(
     // offline while this returned "Sale page published!" with a working-looking
     // URL — the route's already-has-slug branch updates location only. See the
     // re-publish block in src/app/api/pages/publish/route.ts.
-    const result = await api.post<{ slug: string; url: string }>('/api/pages/publish', {
+    const result = await api.post<{
+      slug: string
+      url: string
+      // Honesty flags, added to the route in 0.9.0 and present only when the
+      // corresponding field was in the request. Before this, a refused
+      // payment_instructions 403'd the ENTIRE publish (stranding an unpublished
+      // page on /expired — audit F1), and a discarded custom_url reported plain
+      // success (F3). Now the publish lands and the flags say what didn't.
+      payment_instructions_applied?: boolean
+      payment_instructions_reason?: string
+      payment_instructions_message?: string
+      custom_url_applied?: boolean
+      custom_url_reason?: string
+      custom_url_message?: string
+    }>('/api/pages/publish', {
       ...args,
       publish: true,
     })
@@ -724,13 +745,41 @@ export function registerSellerTools(
       }
     }
 
+    // The message must not read as unqualified success when part of the request
+    // was refused — an agent relays the message, and the seller who asked for a
+    // vanity URL or new payment details deserves to hear what actually
+    // happened. The flags are forwarded verbatim (CLAUDE.md rule: the route
+    // owns the field names) so a structured reader never depends on prose.
+    const data = result.data
+    let message = 'Sale page published!'
+    if (data?.payment_instructions_applied === false) {
+      message += ' Payment instructions were NOT changed — relay payment_instructions_message to the seller.'
+    }
+    if (data?.custom_url_applied === false) {
+      message += ' The requested custom URL was NOT applied — relay custom_url_message to the seller.'
+    }
+
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
-          message: 'Sale page published!',
-          url: result.data?.url,
-          slug: result.data?.slug,
+          message,
+          url: data?.url,
+          slug: data?.slug,
+          ...(data?.payment_instructions_applied !== undefined
+            ? {
+                payment_instructions_applied: data.payment_instructions_applied,
+                ...(data.payment_instructions_reason ? { payment_instructions_reason: data.payment_instructions_reason } : {}),
+                ...(data.payment_instructions_message ? { payment_instructions_message: data.payment_instructions_message } : {}),
+              }
+            : {}),
+          ...(data?.custom_url_applied !== undefined
+            ? {
+                custom_url_applied: data.custom_url_applied,
+                ...(data.custom_url_reason ? { custom_url_reason: data.custom_url_reason } : {}),
+                ...(data.custom_url_message ? { custom_url_message: data.custom_url_message } : {}),
+              }
+            : {}),
         }, null, 2),
       }],
     }
@@ -1201,7 +1250,7 @@ export function registerSellerTools(
   server.registerTool('get_page_stats', {
     title: 'Get Page Stats',
     description:
-      'Get stats for the published sale page: total views, item count, reservation count. Requires the page slug.',
+      'Get stats for the published sale page: total page views, live item count, and how many reservations are currently active. Requires the page slug.',
     inputSchema: {
       slug: z.string().describe('The sale page slug (e.g., "sarahs-stuff")'),
     },
@@ -1212,11 +1261,41 @@ export function registerSellerTools(
       destructiveHint: false,
     },
   }, async ({ slug }) => {
-    const result = await api.get(`/api/pages/${slug}?stats_only=true`)
+    const result = await api.get<{
+      stats?: { total_page_views: number; total_items: number; active_reservations: number }
+      stats_reason?: 'unauthenticated' | 'not_owner'
+    }>(`/api/pages/${slug}?stats_only=true`)
 
     if (!result.success) {
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({ error: result.error || 'Unknown error', message: 'Failed to fetch page stats' }, null, 2) }],
+        isError: true,
+      }
+    }
+
+    // Read the route's `stats` object rather than passing the whole payload
+    // through under that name. This used to forward `result.data` — the buyer
+    // page payload, seller block and item array and all — labelled `stats`,
+    // which contained no view count at all: the description promised three
+    // numbers and the response held none of them.
+    const stats = result.data?.stats
+    if (!stats) {
+      // Name the ACTUAL cause. This used to say "the server may be older than
+      // this tool" for every absent-stats case, which is the least likely one:
+      // a wrong slug (someone else's sale) and an expired API key both land
+      // here, and an agent told its server was stale would chase a deployment
+      // instead of regenerating a key. The route now says which it is.
+      const reason = result.data?.stats_reason
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          error: 'No stats in response',
+          stats_reason: reason ?? null,
+          message: reason === 'not_owner'
+            ? `Stats are only visible to the seller who owns this page, and this account does not own "${slug}". Check the slug — get_profile or publish_page will confirm which one belongs to this account.`
+            : reason === 'unauthenticated'
+              ? 'The server did not accept this credential, so it would not release the stats. The API key is most likely expired or revoked — re-run the onboarding flow (send_verification_code, then verify_code) to get a new one.'
+              : 'The page was found but returned no stats block and no reason. If the rest of the tools work, this deployment is probably older than this client — stats moved into a dedicated block in 0.8.0.',
+        }, null, 2) }],
         isError: true,
       }
     }
@@ -1226,7 +1305,10 @@ export function registerSellerTools(
         type: 'text' as const,
         text: JSON.stringify({
           message: 'Page stats retrieved',
-          stats: result.data,
+          slug,
+          total_page_views: stats.total_page_views,
+          total_items: stats.total_items,
+          active_reservations: stats.active_reservations,
         }, null, 2),
       }],
     }
@@ -1365,9 +1447,20 @@ export function registerSellerTools(
       'If the seller has a discount code, pass it as promo_code and it will be pre-filled on the checkout page so they do not have to type it. ' +
       'Say "pre-filled", not "applied": ClearList does not verify the code with Stripe, and an expired, inactive or fully-redeemed code is silently ignored at checkout, showing full price. Tell the seller to check the total before paying.',
     inputSchema: {
+      // The two extension SKUs were missing until 2026-08-07, which closed a
+// loop the API itself opens: when the seller is already on a paid plan,
+      // /api/payments/checkout-link answers with "request move_extension" — and
+      // the SDK then rejected that value at schema validation before any HTTP
+      // request was made. The route has always accepted both extension SKUs
+      // (checkout-link/route.ts:31); the enum was the only thing blocking a
+      // purchase the server was actively recommending.
       plan: z
-        .enum(['sale_pass', 'big_move'])
-        .describe('Plan to upgrade to: "sale_pass" ($20) or "big_move" ($39)'),
+        .enum(['sale_pass', 'big_move', 'move_extension', 'garage_extension'])
+        .describe(
+          'What to buy. Upgrades: "sale_pass" (Move Sale, $20, 50 items, 30 days) or "big_move" (Garage Sale, $39, 200 items, 60 days). ' +
+          'Time extensions for a seller ALREADY on a paid plan, which add 30 days without changing the item limit: "move_extension" ($10, for sale_pass) or "garage_extension" ($20, for big_move). ' +
+          'If check_tier_status or a previous call said the seller is already paid, use the extension it names rather than an upgrade.',
+        ),
       promo_code: z
         .string()
         .optional()
@@ -1399,6 +1492,18 @@ export function registerSellerTools(
       duration_days: number
       already_paid?: boolean
       message: string
+      // Extension branch only (checkout-link/route.ts:177-190). `adds_capacity`
+      // is the discriminator: false means time-only, and `items_limit` is
+      // absent on that branch.
+      price_usd?: number
+      adds_capacity?: boolean
+      // The already_paid branch's machine-readable half. The route emits these
+      // (checkout-link/route.ts:230-236) and this tool dropped all three, so an
+      // agent had only English prose telling it to "request move_extension" and
+      // nothing structured to act on.
+      suggested_action?: string
+      suggested_sku?: string
+      suggested_price_usd?: number
     }>('/api/payments/checkout-link', {
       plan,
       // Only sent when present. zod strips unknown keys, so a misspelled
@@ -1421,6 +1526,50 @@ export function registerSellerTools(
           text: JSON.stringify({
             message: result.data.message,
             already_paid: true,
+            // Forwarded so the agent can act without parsing the prose. When
+            // suggested_sku is present, calling this tool again with
+            // plan: <suggested_sku> is the documented next step — and now
+            // actually works, since the enum accepts the extension SKUs.
+            ...(result.data.suggested_action ? { suggested_action: result.data.suggested_action } : {}),
+            ...(result.data.suggested_sku ? { suggested_sku: result.data.suggested_sku } : {}),
+            ...(result.data.suggested_price_usd !== undefined
+              ? { suggested_price_usd: result.data.suggested_price_usd }
+              : {}),
+            ...(result.data.suggested_sku
+              ? { next_step: `Call generate_payment_link again with plan: "${result.data.suggested_sku}" to get a checkout link for the extension.` }
+              : {}),
+          }, null, 2),
+        }],
+      }
+    }
+
+    // Branch on what the ROUTE returned, not on what this tool assumed.
+    //
+    // Widening the enum made the extension SKUs reachable, and this success
+    // path still spoke only upgrade: it said "upgrade to {plan_name}" where
+    // plan_name for BOTH extensions is literally "Keep My Page Live", forwarded
+    // an `items_limit` the extension branch does not return (so JSON.stringify
+    // dropped it), and told the agent to confirm with check_tier_status — which
+    // for an extension reports the same tier and the same limit, reading as a
+    // failed purchase. Meanwhile the route's own message ("Their item limit and
+    // remaining listing allowance do not change") and its price were discarded.
+    // A seller at their item cap would have paid $10 for capacity they did not
+    // get. Same defect this release fixes in confirm_pickup, on its sibling.
+    if (result.data.adds_capacity === false) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            // The route says it best, and says it correctly.
+            message: result.data.message,
+            checkout_url: result.data.checkout_url,
+            plan: result.data.plan,
+            plan_name: result.data.plan_name,
+            price_usd: result.data.price_usd,
+            duration_days: result.data.duration_days,
+            adds_capacity: false,
+            warning: 'This is a TIME extension, not an upgrade. The seller\'s item limit and remaining allowance are unchanged — say so before they pay, especially if they asked for more items.',
+            instructions: 'The user taps the link and pays in their browser. Afterwards check_tier_status will show the SAME tier and item limit with a later expiry date; that is success, not failure.',
           }, null, 2),
         }],
       }
@@ -1500,22 +1649,37 @@ export function registerSellerTools(
   server.registerTool('confirm_pickup', {
     title: 'Confirm Pickup',
     description:
-      'Confirm that a buyer has picked up their reserved items. Marks all items in the reservation as "taken" (sold). ' +
-      'Use get_reservations first to find the reservation details.',
+      'Close out a reservation after the pickup window. Two outcomes: action "sold" (the default) marks every item in the reservation as taken, ' +
+      'and action "noshow" records that the buyer never came — which releases their items, frees the booked pickup slot, advances the queue, and ' +
+      'emails the next buyer in line that they are up. Use get_reservations first to find the reservation_id. ' +
+      'Only report a no-show when the seller tells you the buyer did not turn up; it cancels a real person\'s reservation and the mail it sends cannot be recalled.',
     inputSchema: {
       reservation_id: z.string().describe('The reservation ID to confirm pickup for'),
+      // Added 2026-08-07. Its absence made the no-show half of this route
+      // unreachable over MCP entirely: the handler hardcoded 'sold', and zod
+      // STRIPS unknown keys, so an agent that correctly guessed `action` had it
+      // removed before the request. An agent asked "the buyer never showed,
+      // release it for the next person" had no tool that could do it. Same trap
+      // that made set_availability unusable — see the note in CLAUDE.md.
+      action: z
+        .enum(['sold', 'noshow'])
+        .optional()
+        .default('sold')
+        .describe('"sold" (default) if the buyer collected the items. "noshow" if they never came — releases the items and promotes the next buyer in the queue.'),
     },
     annotations: {
       title: 'Confirm Pickup',
       readOnlyHint: false,
       // Flips item status to `taken` (publicly visible) AND emails the buyer
-      // via notifyBuyerPickupConfirmed / notifyBuyerQueueAdvanced.
+      // via notifyBuyerPickupConfirmed / notifyBuyerQueueAdvanced. The noshow
+      // branch also emails whoever it promotes off the queue.
       openWorldHint: true,
-      // Those buyer emails cannot be recalled, and confirming a pickup can
-      // advance the queue for other buyers.
+      // Those buyer emails cannot be recalled, and either outcome can advance
+      // the queue for other buyers. A no-show additionally terminates a
+      // reservation the buyer still believes is theirs.
       destructiveHint: true,
     },
-  }, async ({ reservation_id }) => {
+  }, async ({ reservation_id, action }) => {
     // Authorized by the seller's own API key. The route accepts an
     // authenticated owner as an alternative to the token in the seller's
     // pickup-check email, so there is no token to fetch.
@@ -1532,7 +1696,11 @@ export function registerSellerTools(
       skipped_count?: number
       retryable?: boolean
       errored_count?: number
-    }>(`/api/reservations/${reservation_id}/pickup-confirm`, { action: 'sold' })
+      // Emitted by the noshow branch only: how many queued buyers moved up a
+      // place as a result. Absent from this type until 2026-08-07, so it was
+      // dropped even once the action reached the route.
+      promotions?: number
+    }>(`/api/reservations/${reservation_id}/pickup-confirm`, { action })
 
     if (!confirmResult.success) {
       // Forward the structured partial-failure shape, not just the message.
@@ -1554,8 +1722,15 @@ export function registerSellerTools(
           type: 'text' as const,
           text: JSON.stringify({
             error: confirmResult.error || 'Unknown error',
-            message: 'Failed to confirm pickup',
+            // Generic on purpose — the route's own error text carries the
+            // specifics, and a 409 here says the pickup WAS handled, which a
+            // fixed "Failed to confirm pickup" would otherwise contradict.
+            message: 'Could not complete this pickup action — see error.',
             reservation_id,
+            // Forwarded so a 409 (someone else already handled this pickup,
+            // permanent) is distinguishable from a 500 partial without parsing
+            // prose. api-client does not retry 409.
+            http_status: confirmResult.http_status,
             outcome: failure.outcome ?? null,
             retryable: failure.retryable ?? false,
             errored_count: failure.errored_count ?? null,
@@ -1579,6 +1754,30 @@ export function registerSellerTools(
             reservation_id,
             outcome: 'already_processed',
             status: data.status ?? null,
+          }, null, 2),
+        }],
+      }
+    }
+
+    // Branch on the ROUTE's outcome instead of asserting 'confirmed'.
+    //
+    // This block hardcoded outcome 'confirmed' and "items marked as sold" for
+    // every success, so once `action` started reaching the route a no-show
+    // would have been reported to the seller as a completed sale — the opposite
+    // of what happened, on the one action that cancels someone's reservation.
+    if (data.outcome === 'noshow') {
+      const promotions = data.promotions ?? 0
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            message: promotions > 0
+              ? `Recorded as a no-show. The items are released and ${promotions} buyer(s) moved up the queue — they have been emailed that they are next.`
+              : 'Recorded as a no-show. The items are released and available again; nobody was waiting in the queue.',
+            reservation_id,
+            outcome: 'noshow',
+            item_count: data.item_count ?? null,
+            promotions,
           }, null, 2),
         }],
       }
@@ -1626,9 +1825,22 @@ export function registerSellerTools(
       items_remaining: number
       expires_at: string | null
       is_expired: boolean
+      // Identity block, added to the route in 0.9.0. This tool's description
+      // promised "email … sale page URL, and scheduling status" from the day it
+      // shipped and returned none of them — which broke the recovery path
+      // get_page_stats' own error copy prescribes ("get_profile will confirm
+      // which slug belongs to this account"). A returning session with the key
+      // in host config had to call publish_page, a WRITE, to learn its own URL.
+      email?: string | null
+      page_slug?: string | null
+      page_url?: string | null
+      page_published?: boolean
+      scheduling_enabled?: boolean
+      scheduling_timezone?: string | null
     }>('/api/payments/status')
 
-    // Get listings to find the page slug
+    // Get listings for the counts. The page slug arrives from
+    // /api/payments/status above (0.9.0), not from here.
     const listingsResult = await api.get('/api/items')
 
     // Combine the data
@@ -1650,7 +1862,13 @@ export function registerSellerTools(
           type: 'text' as const,
           text: JSON.stringify({
             error: tierResult.error || 'Unknown error',
-            message: 'Could not read the account profile. This is NOT a free-tier account — the tier is unknown. An expired or invalid API key is the most likely cause.',
+            // "This is NOT a free-tier account" until 2026-08-07 — an
+            // affirmative denial the failed call cannot support. A free-tier
+            // seller with an expired key is one of the likeliest ways to land
+            // here, so an agent relaying it told exactly the wrong person the
+            // wrong thing. The comment above argues for "do not assume free";
+            // the wording had over-corrected past it.
+            message: 'Could not read the account profile. The tier is UNKNOWN — do not assume free tier, and do not assume paid. An expired or invalid API key is the most likely cause.',
           }, null, 2),
         }],
         isError: true,
@@ -1673,6 +1891,16 @@ export function registerSellerTools(
           items_remaining: tierData?.items_remaining ?? null,
           expires_at: tierData?.expires_at ?? null,
           is_expired: tierData?.is_expired ?? null,
+          // Explicit null, never omitted: JSON.stringify drops undefined, and
+          // against a pre-0.9.0 server these keys are absent from the route's
+          // response. A null says "unknown — possibly an older server"; a
+          // missing key would be unreadable as anything.
+          email: tierData?.email ?? null,
+          page_slug: tierData?.page_slug ?? null,
+          page_url: tierData?.page_url ?? null,
+          page_published: tierData?.page_published ?? null,
+          scheduling_enabled: tierData?.scheduling_enabled ?? null,
+          scheduling_timezone: tierData?.scheduling_timezone ?? null,
           // Listings are secondary — report the counts as unknown rather than
           // as zero when that call alone failed, so "no listings" is never
           // fabricated from an error.
@@ -1725,11 +1953,24 @@ export function registerSellerTools(
     }
 
     const d = result.data
+    // Name the constraint that actually binds. items_remaining is the MINIMUM
+    // of two ceilings — active slots and the lifetime creation cap — and the
+    // summary only ever spoke of slots. A free-tier seller who deleted items
+    // (slots free, lifetime cap spent) was told "3 item slots available" while
+    // every create was refused with a cap error; the 2026-08-07 audit hit
+    // exactly this with a 12-photo batch. The structured fields carried the
+    // truth all along; the summary is what an agent relays.
+    const activeSlotsFree = Math.max(0, d.items_limit - d.items_count)
+    const lifetimeBinding = d.lifetime_remaining < activeSlotsFree
     let summary: string
     if (d.needs_upgrade) {
-      summary = `Upgrade needed! ${d.items_remaining} item slots remaining (${d.items_count}/${d.items_limit}). Use generate_payment_link to get an upgrade URL.`
+      summary = d.lifetime_remaining === 0 && activeSlotsFree > 0
+        ? `Upgrade needed! The lifetime creation cap is spent (${d.total_items_created}/${d.lifetime_cap} created) — ${activeSlotsFree} active slot(s) are free, but no new listings can be created on this plan. Use generate_payment_link to get an upgrade URL (a new pass resets the cap).`
+        : `Upgrade needed! ${d.items_remaining} item slots remaining (${d.items_count}/${d.items_limit}). Use generate_payment_link to get an upgrade URL.`
     } else if (d.tier === 'expired') {
       summary = `Plan expired. Use extend_sale_page to get the eligible renewal choices.`
+    } else if (lifetimeBinding) {
+      summary = `${d.tier} tier — ${d.lifetime_remaining} creation(s) left before the lifetime cap (${d.total_items_created}/${d.lifetime_cap} created; ${activeSlotsFree} active slots free)`
     } else {
       summary = `${d.tier} tier — ${d.items_remaining} item slots available (${d.items_count}/${d.items_limit})`
     }
