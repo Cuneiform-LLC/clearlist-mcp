@@ -25,7 +25,6 @@
  * Configuration (environment variables):
  *   CLEARLIST_API_URL     — Base URL (default: https://clearlist.me)
  *   CLEARLIST_API_KEY     — API key (optional — can be acquired via onboarding)
- *   CLEARLIST_SELLER_UID  — Firebase UID (optional, for logging only)
  *
  * Usage with Claude Desktop:
  *   {
@@ -53,7 +52,20 @@ import { registerUiResources } from './ui/register.js'
 // ── Configuration ────────────────────────────────────────────────────────────
 const API_URL = process.env.CLEARLIST_API_URL || 'https://clearlist.me'
 const API_KEY = process.env.CLEARLIST_API_KEY
-const SELLER_UID = process.env.CLEARLIST_SELLER_UID || 'agent'
+// CLEARLIST_SELLER_UID is deliberately NOT read.
+//
+// It was briefly live in Feb 2026 — required at first (ed05c7af), then
+// optional (364aec3e) — and went dead in a merge that kept its const and
+// doc line beside 1822790e's hardcoded `sellerUid: 'agent'`. No PUBLISHED
+// version ever read it: all three commits were 0.1.0 and the first publish
+// was 0.5.0. So the doc line promised "optional, for logging only" to every
+// user who ever installed this package, and nothing honored it.
+//
+// Wiring it up now would change a published package's behaviour to satisfy
+// a line that was never true of it. The client below hardcodes sellerUid
+// because identity is resolved server-side from the API key, and the
+// client's uid getter has no callers. noUnusedLocals surfaced the const;
+// the doc line goes with it.
 
 // ── Initialize ───────────────────────────────────────────────────────────────
 const api = new ClearListApiClient({
