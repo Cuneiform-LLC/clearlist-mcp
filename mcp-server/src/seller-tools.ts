@@ -13,6 +13,36 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { ClearListApiClient } from './api-client.js'
 
 /**
+ * Encode a caller-supplied id before interpolating it into a URL PATH SEGMENT.
+ *
+ * Tool ids arrive as bare `z.string()`, and a raw `${id}` in a path template
+ * lets the value break out of its own segment and change which route is called:
+ *
+ *   `/api/conversations/${'foo/bar'}` → /api/conversations/foo/bar (wrong doc)
+ *   `/api/items/${'?x'}/restore`      → /api/items/  — the `/restore` becomes
+ *                                       query text, so a POST meant for one
+ *                                       item hits the COLLECTION route
+ *   `/api/items/${'#x'}/restore`      → same, via a fragment (never sent at all)
+ *   `/api/conversations/${'.\t./auth/api-keys'}` → the URL parser strips the
+ *                                       tab, leaving `..`, and resolves to the
+ *                                       durable-API-key mint route
+ *
+ * The client's resolveUrl() guard cannot fix this class on its own: once the
+ * string is assembled it cannot tell which `/` or `?` came from the literal
+ * template and which came from the value. So the boundary is enforced HERE.
+ * encodeURIComponent escapes `/`, `\`, `?`, `#` and tab/LF/CR, so an id can only
+ * ever be ONE segment. Ordinary ids (alphanumeric, `_`, `-`) pass through
+ * byte-identical.
+ *
+ * Defined locally rather than imported: this module is value-imported by the
+ * hosted Next route (src/app/api/mcp/route.ts), and a RELATIVE VALUE import here
+ * breaks that build — the `.js` specifier the stdio ESM build requires does not
+ * resolve under Next's bundler. (Same constraint documented on src/ui/register.ts.)
+ * Type-only relative imports are fine because they are erased.
+ */
+const encodePathSegment = encodeURIComponent
+
+/**
  * MCP Apps (SEP-1865) tool metadata: links a tool to the shared ui:// view.
  * Sets both the standard key (`ui.resourceUri`) and OpenAI's legacy Apps-SDK
  * key (`openai/outputTemplate`) so older ChatGPT ingestion also renders it.
@@ -507,7 +537,7 @@ export function registerSellerTools(
       }
     }
 
-    const result = await api.put(`/api/items/${item_id}`, fields)
+    const result = await api.put(`/api/items/${encodePathSegment(item_id)}`, fields)
 
     if (!result.success) {
       return {
@@ -562,7 +592,7 @@ export function registerSellerTools(
       destructiveHint: true,
     },
   }, async ({ item_id }) => {
-    const result = await api.del(`/api/items/${item_id}`)
+    const result = await api.del(`/api/items/${encodePathSegment(item_id)}`)
 
     if (!result.success) {
       return {
@@ -633,7 +663,7 @@ export function registerSellerTools(
       idempotentHint: true,
     },
   }, async ({ item_id }) => {
-    const result = await api.post(`/api/items/${item_id}/restore`)
+    const result = await api.post(`/api/items/${encodePathSegment(item_id)}/restore`)
 
     if (!result.success) {
       // Forward the status, same as edit_listing, because this route's failures
@@ -1059,7 +1089,7 @@ export function registerSellerTools(
       destructiveHint: false,
     },
   }, async ({ conversation_id }) => {
-    const result = await api.get(`/api/conversations/${conversation_id}`)
+    const result = await api.get(`/api/conversations/${encodePathSegment(conversation_id)}`)
     if (!result.success) {
       return {
         content: [{ type: 'text' as const, text: `Error: ${result.error || 'Failed to get conversation'}` }],
@@ -1154,7 +1184,7 @@ export function registerSellerTools(
       destructiveHint: true,
     },
   }, async ({ conversation_id, message, message_type }) => {
-    const result = await api.post(`/api/conversations/${conversation_id}`, {
+    const result = await api.post(`/api/conversations/${encodePathSegment(conversation_id)}`, {
       content: message,
       type: message_type || 'text',
     })
@@ -1213,7 +1243,7 @@ export function registerSellerTools(
       destructiveHint: false,
     },
   }, async ({ item_id }) => {
-    const result = await api.put(`/api/items/${item_id}`, {
+    const result = await api.put(`/api/items/${encodePathSegment(item_id)}`, {
       status: 'taken',
     })
 
@@ -1264,7 +1294,7 @@ export function registerSellerTools(
     const result = await api.get<{
       stats?: { total_page_views: number; total_items: number; active_reservations: number }
       stats_reason?: 'unauthenticated' | 'not_owner'
-    }>(`/api/pages/${slug}?stats_only=true`)
+    }>(`/api/pages/${encodePathSegment(slug)}?stats_only=true`)
 
     if (!result.success) {
       return {
@@ -1623,7 +1653,7 @@ export function registerSellerTools(
       destructiveHint: false,
     },
   }, async ({ item_id }) => {
-    const result = await api.get(`/api/crosspost/prepare?itemId=${item_id}`)
+    const result = await api.get(`/api/crosspost/prepare?itemId=${encodeURIComponent(item_id)}`)
 
     if (!result.success) {
       return {
@@ -1700,7 +1730,7 @@ export function registerSellerTools(
       // place as a result. Absent from this type until 2026-08-07, so it was
       // dropped even once the action reached the route.
       promotions?: number
-    }>(`/api/reservations/${reservation_id}/pickup-confirm`, { action })
+    }>(`/api/reservations/${encodePathSegment(reservation_id)}/pickup-confirm`, { action })
 
     if (!confirmResult.success) {
       // Forward the structured partial-failure shape, not just the message.

@@ -121,8 +121,36 @@ export function registerUiResources(server: McpServer): void {
       description:
         'Interactive view for ClearList tool results: listings gallery, publish success card, and reservations summary.',
       mimeType: UI_RESOURCE_MIME_TYPE,
+      // MCP Apps sandboxes the view and default-denies external resources
+      // (ext-apps schema: resourceDomains "omitted -> no network resources"),
+      // which blanked every widget <img> thumbnail. resourceDomains maps to the
+      // CSP img-src directive. BOTH hosts are required: agent-created listings
+      // serve bare storage.googleapis.com (Admin SDK makePublic), PWA-created
+      // ones serve tokened firebasestorage.googleapis.com.
+      _meta: {
+        ui: {
+          csp: {
+            resourceDomains: [
+              'https://storage.googleapis.com',
+              'https://firebasestorage.googleapis.com',
+            ],
+          },
+        },
+      },
     },
     async () => ({
+      // Mirror the CSP on the resources/read result too; hosts may read it from
+      // either the registration metadata or the read response.
+      _meta: {
+        ui: {
+          csp: {
+            resourceDomains: [
+              'https://storage.googleapis.com',
+              'https://firebasestorage.googleapis.com',
+            ],
+          },
+        },
+      },
       contents: [
         {
           uri: UI_APP_RESOURCE_URI,

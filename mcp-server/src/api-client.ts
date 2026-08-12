@@ -62,6 +62,16 @@ function truncateForAgent(text: unknown): string | undefined {
 const RETRYABLE_STATUS_CODES = new Set([429, 500, 503])
 
 /**
+ * NOTE on caller-supplied ids: values interpolated into a URL PATH SEGMENT are
+ * encoded at the interpolation site (see `encodePathSegment` in seller-tools.ts)
+ * so they cannot break out of their segment and retarget the request. resolveUrl
+ * below cannot do that job — once the string is assembled it cannot tell which
+ * `/` or `?` came from the literal template and which came from the value. The
+ * two layers are complementary: encoding preserves segment boundaries, resolveUrl
+ * refuses traversal, host override, and anything outside /api/.
+ */
+
+/**
  * Truncate a non-JSON response body to a single line of bounded length.
  * HTML error pages can be many KB; we just want a hint, not the full DOM.
  */
@@ -139,12 +149,87 @@ export class ClearListApiClient {
     return { requestCount: this.requestCount }
   }
 
+  /**
+   * Build the request URL, refusing path traversal.
+   *
+   * Tool arguments (item_id, conversation_id, slug, reservation_id) are
+   * interpolated RAW into path segments, e.g. `/api/conversations/${id}`, and
+   * `new URL()` NORMALIZES `../` segments. So a crafted id like
+   * `"../auth/api-keys"` would silently retarget the request at a DIFFERENT
+   * route (here: the durable-API-key mint route) while still resolving under the
+   * same origin — an agent reaching an endpoint its tool never intended. This is
+   * the single place every method builds a URL, so the guard lives here and
+   * covers all of them at once rather than per call site.
+   *
+   * Returns the URL, or an { error } the caller surfaces as a normal
+   * ApiResponse failure — this client never throws for a bad request (see
+   * request()), so the guard must not either.
+   */
+  private resolveUrl(path: string): { url: URL } | { error: string } {
+    // Only the PATH can traverse to another route; a `..` inside the query
+    // string is a parameter value the destination route handles, not a segment.
+    const rawPathname = path.split('?', 1)[0]
+
+    // STRIP FIRST, THEN SCAN. The WHATWG URL parser DELETES tab, LF and CR
+    // anywhere in the input before it resolves dot segments. So `".\t."` is not
+    // `".."` to a naive string scan, but it IS `".."` to the parser: the path
+    // `/api/conversations/.<TAB>./auth/api-keys` resolves to /api/auth/api-keys
+    // — the durable-key mint route. Scanning the un-stripped string missed that
+    // entirely. Everything below is checked on the same view the parser uses.
+    const stripIgnored = (s: string): string => s.replace(/[\t\n\r]/g, '')
+
+    let decodedPathname: string
+    try {
+      decodedPathname = decodeURIComponent(rawPathname)
+    } catch {
+      return { error: 'Invalid request path (malformed encoding).' }
+    }
+    // Backslash is a path separator for special schemes, so fold it too.
+    const hasDotDotSegment = (s: string): boolean =>
+      stripIgnored(s).replace(/\\/g, '/').split('/').some((seg) => seg === '..')
+    if (hasDotDotSegment(rawPathname) || hasDotDotSegment(decodedPathname)) {
+      return { error: 'Invalid request path (path traversal is not allowed).' }
+    }
+
+    // `new URL` THROWS on malformed input (e.g. "https://[bad/api/x"), and this
+    // client's contract is to never throw for a bad request — request() always
+    // returns { success: false, error }. So both parses are guarded.
+    let base: URL
+    let url: URL
+    try {
+      base = new URL(this.baseUrl)
+      url = new URL(path, base)
+    } catch {
+      return { error: 'Invalid request path (malformed URL).' }
+    }
+
+    // Host pinning. `new URL(path, base)` lets an absolute or protocol-relative
+    // `path` ("https://evil/…", "//evil/…", and "/\evil/…" — WHATWG treats a
+    // leading slash-backslash as protocol-relative for special schemes) OVERRIDE
+    // the host, which would send the seller's API-key header to an attacker.
+    if (url.origin !== base.origin) {
+      return { error: 'Invalid request path (host mismatch).' }
+    }
+    // Re-check the PARSED pathname, not just the input: this is the definitive,
+    // post-normalization view, so any traversal the pre-parse scan missed still
+    // has to survive this to reach the network.
+    if (!url.pathname.startsWith('/api/')) {
+      return { error: 'Invalid request path (outside the ClearList API).' }
+    }
+    if (url.pathname.split('/').some((seg) => seg === '..')) {
+      return { error: 'Invalid request path (path traversal is not allowed).' }
+    }
+    return { url }
+  }
+
   async get<T = unknown>(
     path: string,
     params?: Record<string, string>,
     opts?: { timeoutMs?: number; noRetryOnTimeout?: boolean },
   ): Promise<ApiResponse<T>> {
-    const url = new URL(path, this.baseUrl)
+    const resolved = this.resolveUrl(path)
+    if ('error' in resolved) return { success: false, error: resolved.error }
+    const url = resolved.url
     if (params) {
       for (const [key, value] of Object.entries(params)) {
         if (value !== undefined) url.searchParams.set(key, value)
@@ -157,7 +242,9 @@ export class ClearListApiClient {
     path: string,
     body?: Record<string, unknown>,
   ): Promise<ApiResponse<T>> {
-    const url = new URL(path, this.baseUrl)
+    const resolved = this.resolveUrl(path)
+    if ('error' in resolved) return { success: false, error: resolved.error }
+    const url = resolved.url
     return this.request<T>(url.toString(), {
       method: 'POST',
       headers: {
@@ -176,7 +263,9 @@ export class ClearListApiClient {
     path: string,
     body?: Record<string, unknown>,
   ): Promise<ApiResponse<T>> {
-    const url = new URL(path, this.baseUrl)
+    const resolved = this.resolveUrl(path)
+    if ('error' in resolved) return { success: false, error: resolved.error }
+    const url = resolved.url
     return this.request<T>(url.toString(), {
       method: 'PUT',
       headers: {
@@ -191,7 +280,9 @@ export class ClearListApiClient {
     path: string,
     params?: Record<string, string>,
   ): Promise<ApiResponse<T>> {
-    const url = new URL(path, this.baseUrl)
+    const resolved = this.resolveUrl(path)
+    if ('error' in resolved) return { success: false, error: resolved.error }
+    const url = resolved.url
     if (params) {
       for (const [key, value] of Object.entries(params)) {
         if (value !== undefined) url.searchParams.set(key, value)
@@ -209,7 +300,9 @@ export class ClearListApiClient {
     path: string,
     body?: Record<string, unknown>,
   ): Promise<ApiResponse<T>> {
-    const url = new URL(path, this.baseUrl)
+    const resolved = this.resolveUrl(path)
+    if ('error' in resolved) return { success: false, error: resolved.error }
+    const url = resolved.url
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
