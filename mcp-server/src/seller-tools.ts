@@ -222,6 +222,15 @@ export function registerSellerTools(
     const created = (createResult.data ?? {}) as Record<string, unknown>
     const isInactive = created.inactive === true
 
+    // Forward the route's near-duplicate price advisory for the same reason as
+    // `inactive` above: this tool builds its output field by field, so anything
+    // the route adds and this object omits is silently dropped. The advisory
+    // fires when the seller already lists what looks like the same item at a
+    // sharply different price — the $175-vs-$10 case. It is a SUGGESTION for the
+    // seller, not an instruction to the agent: the item is already saved, and
+    // nothing here should re-price it without asking.
+    const advisory = created.pricing_advisory ?? null
+
     return {
       content: [{
         type: 'text' as const,
@@ -233,6 +242,7 @@ export function registerSellerTools(
           inactive: isInactive,
           listing: aiResult,
           price_research: priceResult.success ? priceResult.data : null,
+          ...(advisory ? { pricing_advisory: advisory } : {}),
         }, null, 2),
       }],
     }
@@ -399,6 +409,7 @@ export function registerSellerTools(
           // Step 3d: Save the item
           let itemId = null
           let savedInactive = false
+          let savedAdvisory: unknown = null
           const saveResult = await api.post('/api/items', {
             fromTry: true,
             photos: groupPhotoUrls,
@@ -413,6 +424,11 @@ export function registerSellerTools(
             // 'saved' for all of them reports a whole sale as live when most of
             // it is invisible to buyers.
             savedInactive = saved.inactive === true
+            // Near-duplicate price advisory, forwarded per item. A bulk batch is
+            // where duplicates are MOST likely — the seller is working through a
+            // room and photographs the same thing twice — so dropping it here
+            // would lose the signal on the path that generates it most often.
+            savedAdvisory = saved.pricing_advisory ?? null
           }
 
           return {
@@ -426,6 +442,7 @@ export function registerSellerTools(
             bundle_price: bundlePricing,
             qa,
             inactive: savedInactive,
+            ...(savedAdvisory ? { pricing_advisory: savedAdvisory } : {}),
             status: itemId
               ? (savedInactive ? 'saved_inactive' : 'saved')
               : 'generated_but_not_saved',
