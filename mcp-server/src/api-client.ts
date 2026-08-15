@@ -671,16 +671,44 @@ export class ClearListApiClient {
 
     // Check if this is an async job response
     if (result.success && result.job_id) {
-      return this.pollJob<T>(result.job_id)
+      return this.withJobId(await this.pollJob<T>(result.job_id), result.job_id)
     }
 
     // If response has status: 'processing' and job_id in the data
     const data = result.data as Record<string, unknown> | undefined
     if (data && typeof data === 'object' && 'job_id' in data && data.status === 'processing') {
-      return this.pollJob<T>(data.job_id as string)
+      const jobId = data.job_id as string
+      return this.withJobId(await this.pollJob<T>(jobId), jobId)
     }
 
     return result
+  }
+
+  /**
+   * Surface the generation job id on the polled response.
+   *
+   * pollJob returns the COMPLETED job's data, which carries no job_id on
+   * success (it only set one on the timeout branch, for logs). Wave 2 W2e needs
+   * that id on success too: create_listing / bulk_create_listings forward it as
+   * `ai_job_id` to POST /api/items, where the trust ladder verifies the
+   * server-owned job (ownership, completion, single-use, photo fingerprint) and
+   * decides staging from the JOB rather than the caller's aiResult flag.
+   *
+   * Applied to EVERY polled outcome, failures included, so a failed run can be
+   * traced to its job in the logs. Job ids are not secrets, and callers MUST
+   * gate the `ai_job_id` forward on success so an id from a failed poll never
+   * reaches the route. Both do today: `create_listing` returns early on
+   * `!generateResult.success`, and the bulk path on a null `listing`, which is
+   * derived from `genResult.success`. A third caller inherits that requirement.
+   *
+   * The `??` cannot currently pick anything but `jobId` — the only branch that
+   * sets `job_id` is the timeout, and it sets exactly the id it was passed. It
+   * stays as a `??` rather than a plain assignment so that a future branch which
+   * DOES learn a different id (a server-side re-queue, say) keeps its own rather
+   * than being overwritten here.
+   */
+  private withJobId<T>(polled: ApiResponse<T>, jobId: string): ApiResponse<T> {
+    return { ...polled, job_id: polled.job_id ?? jobId }
   }
 
   private async request<T>(

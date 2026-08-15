@@ -88,6 +88,69 @@ const UI_TOOL_META: Record<string, unknown> = {
 // Exported for the test lane only — no runtime caller outside this file. It is
 // pinned because getting it wrong is not a cosmetic bug: deriving `retryable`
 // from the 409 status alone is what put a looping agent into an infinite retry.
+/**
+ * Pick one identification for a group of photos.
+ *
+ * The caller labels PHOTOS, because it cannot know how ClearList will group them —
+ * grouping happens server-side, after upload. So identifications arrive positionally
+ * aligned to the photos array and have to be mapped onto whatever groups come back.
+ *
+ * Most frequent non-empty wins, ties broken by first appearance. Not "first
+ * non-empty": the grouper sometimes merges two different items into one group, and
+ * on that group the majority label is the better of two imperfect answers. Returns
+ * undefined when nothing usable was supplied, so the caller can omit the field
+ * entirely rather than send an empty string (which would render an empty
+ * identification block in the prompt — the noise default in a different costume).
+ *
+ * Local to this file on purpose: seller-tools.ts must have no relative VALUE
+ * imports (it is value-imported by the Next app, where the `.js` specifier the
+ * stdio ESM build needs does not resolve). Same reason classifyItemWriteFailure
+ * lives here.
+ */
+export function identificationForGroup(
+  photoIndices: number[],
+  identifications: string[] | undefined,
+): string | undefined {
+  if (!identifications?.length) return undefined
+
+  const counts = new Map<string, { count: number; firstSeen: number }>()
+
+  for (let position = 0; position < photoIndices.length; position++) {
+    const raw = identifications[photoIndices[position]]
+    if (typeof raw !== 'string') continue
+    const label = raw.trim()
+    if (!label) continue
+
+    const existing = counts.get(label)
+    if (existing) existing.count++
+    else counts.set(label, { count: 1, firstSeen: position })
+  }
+
+  let best: { label: string; count: number; firstSeen: number } | null = null
+  counts.forEach((value, label) => {
+    if (!best || value.count > best.count || (value.count === best.count && value.firstSeen < best.firstSeen)) {
+      best = { label, count: value.count, firstSeen: value.firstSeen }
+    }
+  })
+
+  return best ? (best as { label: string }).label : undefined
+}
+
+/**
+ * A prohibited-item refusal from POST /api/items is a HARD BLOCK, not a transient
+ * save failure — retrying identical photos can never succeed, and the item cannot
+ * be listed on ClearList at all. Surfaced generically ("failed to save it") an
+ * agent reads it as retryable and loops, or tells the seller it will try again.
+ *
+ * Matches the stable fragment of the route's own message
+ * (`validateItemCreate` in `src/lib/validation/index.ts`), which the
+ * unidentified-shell refusal ("could not be identified") does not contain. Local
+ * to this file for the no-relative-value-imports reason above.
+ */
+export function isProhibitedRefusal(error?: string): boolean {
+  return /cannot be listed on ClearList/i.test(error ?? '')
+}
+
 export function classifyItemWriteFailure(result: { error?: string; http_status?: number }): {
   http_status?: number
   retryable: boolean
@@ -134,7 +197,13 @@ export function registerSellerTools(
       // prose recreates, by hand, exactly the drift src/lib/ai/models.ts exists
       // to centralise away.
       'Send photos of a single item and get an AI-generated listing with title, description, price, dimensions, weight, and transport notes. The listing is saved to the seller\'s account. For multiple items at once, use bulk_create_listings instead. ' +
-      'Example: { photos: ["data:image/jpeg;base64,..."], description: "Vintage wooden desk, some scratches on top" }',
+      'Always pass item_identification when you can tell what the item is: images often reach ClearList at a lower resolution than the ones you were shown, so your identification may be the only reliable one. ' +
+      // The example is doing teaching work, so the two fields must be filled the
+      // way they are meant to be used: item_identification is what YOU see,
+      // description is what the SELLER said. The old example put an identity
+      // ("Vintage wooden desk") in description, which invited callers to route
+      // their own photo reading into the field that carries seller authority.
+      'Example: { photos: ["data:image/jpeg;base64,..."], item_identification: "KitchenAid Artisan stand mixer, red", description: "she says it is about five years old and the dough hook is missing" }',
     inputSchema: {
       photos: z
         .array(z.string())
@@ -144,7 +213,20 @@ export function registerSellerTools(
       description: z
         .string()
         .optional()
-        .describe('Optional text description to help the AI (e.g., "IKEA Kallax shelf, 2 years old")'),
+        .describe(
+          "What the SELLER told you about this item, relayed in their words — age, condition, history, quirks, what is and is not included (e.g. \"had it about two years, small dent on the base, the stand isn't included\"). " +
+          'This is treated as the seller speaking, and the seller is believed over the photos, so put only what they actually said here. ' +
+          'Do NOT put your own reading of the photos in this field — that goes in item_identification.',
+        ),
+      item_identification: z
+        .string()
+        .optional()
+        .describe(
+          'What YOU can see this item is, from the photos the seller gave you — brand, model, and item type if you can read them (e.g. "KitchenAid Artisan KSM150 stand mixer, red"). ' +
+          'Fill this in whenever you can identify the item, even if you are only fairly confident, and say what you are unsure about rather than omitting it. ' +
+          'It matters because the photos may reach ClearList at a lower resolution than the ones you were shown, so you may be able to read a label that ClearList cannot. ' +
+          'Describe only what is visible. Do not guess a model number or year you cannot see.',
+        ),
       voice_transcription: z
         .string()
         .optional()
@@ -158,12 +240,15 @@ export function registerSellerTools(
       // Purely additive.
       destructiveHint: false,
     },
-  }, async ({ photos, description, voice_transcription }) => {
+  }, async ({ photos, description, item_identification, voice_transcription }) => {
     // Step 1: Upload photos to Firebase Storage
     const uploadResult = await api.post<{
       fullUrls: string[]
       thumbnailUrls: string[]
-      batchId: string
+      // Optional: a server deployed before this field returns no such key, so a
+      // required type made the undefined case invisible while JSON.stringify
+      // silently dropped it and the job recorded a null batch.
+      batchId?: string
     }>('/api/items/bulk-upload', { photos })
 
     if (!uploadResult.success || !uploadResult.data) {
@@ -176,8 +261,49 @@ export function registerSellerTools(
     // Step 2: Generate AI listing from uploaded photos (polls async job until complete)
     const generateResult = await api.postWithJobPolling('/api/items/bulk-generate', {
       photoUrls: uploadResult.data.fullUrls,
-      groupLabel: description || 'Item to identify',
-      sellerContext: voice_transcription || undefined,
+      // Ties the generation to this upload so the seller's "your assistant
+      // published this" email can group by run once the digest lands (#518 — until
+      // then the sender still emits one mail per publication). One item here, so
+      // this batch is a group of one, which is the right shape either way: the
+      // alternative is the digest guessing where one request ends.
+      batchId: uploadResult.data.batchId,
+      // `description` does NOT go to `groupLabel`, and this is the second half
+      // of removing the 'Item to identify' default. `groupLabel` means one
+      // thing: our web grouper's label for a photo cluster (see CLAUDE.md).
+      // `create_listing` is a single-item tool — it never groups anything — so
+      // there is no cluster label here, and the field was only ever a way to
+      // smuggle caller text into the prompt.
+      //
+      // That mis-routing became harmful once `groupLabel` got its own
+      // low-authority block: an agent putting the seller's own sentence in
+      // `description` (which is what the schema asks for) had it introduced to
+      // the model as "Our photo grouper's guess ... it is not something the
+      // seller wrote ... never attribute it to the seller." That is #503
+      // inverted on the agent path.
+      //
+      // Both caller-supplied texts are statements about the item relayed on the
+      // seller's behalf, so both land in `sellerContext` (→ `sellerNote`) and are
+      // joined rather than one winning: dropping either loses what was said.
+      //
+      // One consequence, deliberate: `sellerContext` carries seller authority.
+      // `voice_transcription` already did, so this extends it to `description` —
+      // the "known widening" #503 accepted for the agent path (on MCP an
+      // assistant fills these fields, not a person), and strictly better than
+      // the alternative, which after the `groupLabel` change would introduce the
+      // seller's own words as a machine guess.
+      //
+      // `sellerContextSource: 'relayed'` is what makes that the ONLY
+      // consequence. `sellerContext` is also a routing input — bare presence
+      // used to select the seller-typed fast path (identifiable/high-confidence,
+      // MEDIUM thinking, measured worse on every tail metric) — and without
+      // this marker, routing `description` here would have changed generation
+      // quality for every description-only agent call as a side effect of a
+      // prompt fix. Relayed context gets the prompt deference, not the cheaper
+      // routing: nobody typed it into our UI, and the relaying model may be
+      // paraphrasing.
+      hostIdentification: item_identification || undefined,
+      sellerContext: [description, voice_transcription].filter(Boolean).join('\n\n') || undefined,
+      sellerContextSource: 'relayed',
     })
 
     if (!generateResult.success || !generateResult.data) {
@@ -194,12 +320,35 @@ export function registerSellerTools(
       fromTry: true,
       photos: uploadResult.data.fullUrls,
       aiResult,
+      // Forward the generation job id so POST /api/items decides staging from the
+      // server-owned job (verified: ownership, completion, single-use, photo
+      // fingerprint) instead of the caller's aiResult flag (Wave 2 W2e).
+      //
+      // When it is absent the route falls to its legacy rung, which STAGES the
+      // listing for the seller to approve rather than publishing it. "Fails
+      // closed" here means the cautious outcome, not a refusal — the item is
+      // still saved, it just never goes public on an unverifiable identity.
+      //
+      // A poll TIMEOUT is not that case and never reaches this call: it returns
+      // `success: false`, and the guard above returns before the save. The
+      // absent-id paths are a synchronous generation and an older server.
+      ...(generateResult.job_id ? { ai_job_id: generateResult.job_id } : {}),
       ...(voice_transcription ? { voiceTranscription: voice_transcription } : {}),
     })
 
     if (!createResult.success) {
+      // A prohibited refusal is permanent — do not let the agent read it as a
+      // transient save failure and retry, or reassure the seller it will work.
+      const prohibited = isProhibitedRefusal(createResult.error)
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ error: createResult.error || 'Unknown error', message: 'AI generated the listing but failed to save it', listing: aiResult }, null, 2) }],
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          error: createResult.error || 'Unknown error',
+          message: prohibited
+            ? 'This item cannot be listed on ClearList — it is a prohibited item (for example weapons, hazardous materials, or other restricted goods). This is permanent: do NOT retry, and tell the seller it can\'t be sold here.'
+            : 'AI generated the listing but failed to save it',
+          ...(prohibited ? { prohibited: true, retryable: false } : {}),
+          listing: aiResult,
+        }, null, 2) }],
         isError: true,
       }
     }
@@ -221,6 +370,10 @@ export function registerSellerTools(
     // nothing is ever reserved.
     const created = (createResult.data ?? {}) as Record<string, unknown>
     const isInactive = created.inactive === true
+    // Both save as inactive, for opposite reasons. Reporting a staged listing with
+    // the tier copy would send the seller off to free a slot or buy an upgrade to
+    // fix something no tier is blocking.
+    const needsSellerApproval = created.needs_seller_approval === true
 
     // Forward the route's near-duplicate price advisory for the same reason as
     // `inactive` above: this tool builds its output field by field, so anything
@@ -231,15 +384,45 @@ export function registerSellerTools(
     // nothing here should re-price it without asking.
     const advisory = created.pricing_advisory ?? null
 
+    // The link the seller can open, forwarded verbatim from the route.
+    //
+    // This is the review surface: an identified agent listing publishes on
+    // create, so the agent is expected to show the seller what it just put up
+    // — "here it is, want changes?" — rather than leave them waiting on the
+    // digest email. The route decides whether a link exists at all (page live,
+    // item publicly visible); a null here means there is nothing to open yet,
+    // never that this tool could not work one out.
+    const publicUrl = created.public_url ?? null
+    const pageUrl = created.page_url ?? null
+    // Forwarded because it is the ONLY field that explains a null public_url on
+    // an item that is neither staged nor over the limit. Without it the agent
+    // sees a saved listing, a real-looking page_url, no link, and no reason —
+    // then hands the seller a URL that renders "This sale has ended".
+    const pageLive = created.page_live
+
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
-          message: isInactive
-            ? 'Listing SAVED BUT NOT LIVE. It was stored as inactive because the seller is at their active-item limit, so buyers cannot see it on the sale page. Free a slot (mark_picked_up or delete_listing on another item), or use check_tier_status and generate_payment_link to raise the limit, then set this one to available with edit_listing.'
-            : 'Listing created successfully',
+          message: needsSellerApproval
+            ? 'Listing SAVED BUT NOT LIVE, and it needs the seller to confirm it. ClearList could not identify this item from the photos it received — hosts often downscale images, so what arrived may be far lower resolution than what you were shown — so the listing was titled from YOUR identification rather than from the photos. Show the seller the title and price and ask them to confirm both. Nothing is blocking it except that confirmation: once they agree, set it to available with edit_listing. Do NOT tell them it is live.'
+            : isInactive
+              ? 'Listing SAVED BUT NOT LIVE. It was stored as inactive because the seller is at their active-item limit, so buyers cannot see it on the sale page. Free a slot (mark_picked_up or delete_listing on another item), or use check_tier_status and generate_payment_link to raise the limit, then set this one to available with edit_listing.'
+              : publicUrl
+                ? 'Listing created and LIVE. Show the seller the title, price and public_url, and ask whether they want any changes — they can just tell you, or edit it themselves in the ClearList app.'
+                : pageLive === false
+                  ? 'Listing saved, but the seller has no live sale page, so NOTHING is publicly visible yet — a page is unpublished, expired or was taken down. Use publish_page (or extend_sale_page if it lapsed) before telling them buyers can see anything.'
+                  : 'Listing created successfully',
           item_id: created.item_id,
           inactive: isInactive,
+          ...(needsSellerApproval ? { needs_seller_approval: true } : {}),
+          // Explicit null: JSON drops undefined, and a key that vanishes reads
+          // to an agent as "this listing has no link" rather than "this field
+          // exists". `page_live` carries the older-server signal instead — it is
+          // absent, not null, when the server never sent one.
+          public_url: publicUrl,
+          page_url: pageUrl,
+          ...(pageLive !== undefined ? { page_live: pageLive } : {}),
           listing: aiResult,
           price_research: priceResult.success ? priceResult.data : null,
           ...(advisory ? { pricing_advisory: advisory } : {}),
@@ -255,14 +438,30 @@ export function registerSellerTools(
     title: 'Bulk Create Listings',
     description:
       // Model name deliberately omitted — see the note on create_listing above.
-      'Send many photos at once (up to 50). AI automatically groups them by item (detecting multiple angles of the same thing), generates the listings, researches market prices with Google Search grounding, and validates with QA. Returns all detected items with listings and pricing. This is the most efficient way to list multiple items. ' +
-      'Example: { photos: ["data:image/jpeg;base64,...", "...up to 50"], seller_context: "Moving out of 2BR apartment, furniture is mostly IKEA" }',
+      // "researches market prices with Google Search grounding" used to be here. It
+      // is not true: the price agent has no live web access (see the HONESTY note on
+      // the price prompt), so it estimates from training knowledge. Claiming a live
+      // lookup we do not perform is the same defect as fabricated product URLs, and
+      // this string ships verbatim in the public npm package.
+      'Send many photos at once (up to 50). AI automatically groups them by item (detecting multiple angles of the same thing), generates the listings, estimates market prices, and validates with QA. Returns all detected items with listings and pricing. This is the most efficient way to list multiple items. ' +
+      'Always pass photo_identifications when you can tell what the photos show: images often reach ClearList at a lower resolution than the ones you were shown, so your identification may be the only reliable one. ' +
+      'Example: { photos: ["data:image/jpeg;base64,...", "...up to 50"], photo_identifications: ["KitchenAid Artisan stand mixer, red", "KitchenAid Artisan stand mixer, red", "IKEA Kallax shelf, white"], seller_context: "Moving out of 2BR apartment, furniture is mostly IKEA" }',
     inputSchema: {
       photos: z
         .array(z.string())
         .min(1)
         .max(50)
         .describe('Base64-encoded photos (1-50). Can be a mix of items — AI will group them automatically.'),
+      photo_identifications: z
+        .array(z.string())
+        .max(50)
+        .optional()
+        .describe(
+          'What YOU can see in each photo, POSITIONALLY ALIGNED to the photos array — entry 0 describes photo 0. ' +
+          'Use an empty string for a photo you cannot identify. Several photos of the same item should carry the same identification; ' +
+          'ClearList groups the photos itself and will map your identifications onto whatever groups it finds. ' +
+          'Describe only what is visible. Do not guess a model number you cannot see.',
+        ),
       seller_context: z
         .string()
         .optional()
@@ -275,12 +474,13 @@ export function registerSellerTools(
       // Additive, same as create_listing — just many at once.
       destructiveHint: false,
     },
-  }, async ({ photos, seller_context }) => {
+  }, async ({ photos, photo_identifications, seller_context }) => {
     // Step 1: Upload all photos to Firebase Storage
     const uploadResult = await api.post<{
       fullUrls: string[]
       thumbnailUrls: string[]
-      batchId: string
+      /** Optional — see the note on the same field in create_listing. */
+      batchId?: string
       count: number
     }>('/api/items/bulk-upload', { photos })
 
@@ -291,11 +491,11 @@ export function registerSellerTools(
       }
     }
 
-    const { fullUrls, thumbnailUrls } = uploadResult.data
+    const { fullUrls, thumbnailUrls, batchId } = uploadResult.data
 
     // Step 2: Group photos by item (Agent 1 — uses streaming, handled by postStream)
     const groupResult = await api.postStream<{
-      groups: Array<{ photo_indices: number[]; label: string; confidence: string; is_bundle?: boolean; bundle_components?: string[] }>
+      groups: Array<{ photo_indices: number[]; label: string; confidence: string; recognition_type?: string; is_bundle?: boolean; bundle_components?: string[] }>
     }>('/api/items/bulk-group', {
       thumbnailUrls,
       totalPhotos: thumbnailUrls.length,
@@ -314,6 +514,15 @@ export function registerSellerTools(
     // Process up to 3 groups concurrently for speed
     const CONCURRENCY = 3
     const items: Array<Record<string, unknown>> = []
+    // The seller's sale page, reported once for the whole batch rather than
+    // repeated on every item. Every save in a run belongs to the same account,
+    // so each concurrent group writes the same value here and last-write-wins
+    // is not a race. Taken from the route rather than trimmed off an item URL,
+    // because building or dissecting URLs is the route's job, not this layer's.
+    let batchPageUrl: string | null = null
+    // Same field, same reason as create_listing: without it a batch that saved
+    // fine onto a lapsed page reports "3 saved, 0 live" with no explanation.
+    let batchPageLive: boolean | undefined
 
     for (let i = 0; i < groups.length; i += CONCURRENCY) {
       const batch = groups.slice(i, i + CONCURRENCY)
@@ -327,9 +536,28 @@ export function registerSellerTools(
           // Step 3a: Generate listing (polls async job until complete)
           const genResult = await api.postWithJobPolling('/api/items/bulk-generate', {
             photoUrls: groupPhotoUrls,
+            // THE grouping key "one bulk run = one digest" will group on. Every
+            // group in this call shares the batch id from the single upload above,
+            // so once the digest sender lands (#518) the twelve listings an agent
+            // creates from one garage arrive as one email instead of twelve. The key
+            // is threaded now because it has to be recorded at publication time;
+            // nothing reads it yet.
+            batchId,
             groupLabel: group.label,
             groupConfidence: group.confidence,
+            // Forward the grouper's classification so the generic/ambiguous
+            // "this item is uncertain" guidance fires on the MCP bulk path too
+            // (C-P1-6). bulk-generate validates it against its enum.
+            recognitionType: group.recognition_type,
+            // Without this, bulk was the one path host grounding could never reach:
+            // every bulk listing whose photos arrived downscaled stayed a
+            // "Miscellaneous Item" shell, got refused by the save gate, and came back
+            // as `generated_but_not_saved` — after paying for generation, pricing and QA.
+            hostIdentification: identificationForGroup(group.photo_indices, photo_identifications),
             sellerContext: seller_context || undefined,
+            // Agent-relayed, same as create_listing: prompt deference without the
+            // seller-typed routing fast path. See the comment there.
+            sellerContextSource: 'relayed',
             isBundle,
             bundleComponents,
           })
@@ -410,10 +638,21 @@ export function registerSellerTools(
           let itemId = null
           let savedInactive = false
           let savedAdvisory: unknown = null
+          let savedNeedsApproval = false
+          let savedPublicUrl: string | null = null
+          let saveError: string | null = null
           const saveResult = await api.post('/api/items', {
             fromTry: true,
             photos: groupPhotoUrls,
             aiResult: listing,
+            // Forward this group's generation job id (Wave 2 W2e) so POST
+            // /api/items verifies staging from the server-owned job rather than
+            // the caller's listing flag. Per group: each group ran its own
+            // bulk-generate, so each carries its own job id. Absent → the
+            // server's legacy rung, which STAGES the listing for approval
+            // instead of publishing it (saved either way — see the fuller note
+            // on the same forward in create_listing).
+            ...(genResult.job_id ? { ai_job_id: genResult.job_id } : {}),
           })
           if (saveResult.success) {
             const saved = (saveResult.data ?? {}) as Record<string, unknown>
@@ -429,7 +668,31 @@ export function registerSellerTools(
             // room and photographs the same thing twice — so dropping it here
             // would lose the signal on the path that generates it most often.
             savedAdvisory = saved.pricing_advisory ?? null
+            savedNeedsApproval = saved.needs_seller_approval === true
+            // Per-item link, so the agent can list a finished batch as links
+            // instead of ids. This is the primary review surface for bulk: the
+            // seller reads the batch in chat and says "drop the third one".
+            savedPublicUrl = typeof saved.public_url === 'string' ? saved.public_url : null
+            // Batch-level facts about the seller's page. Every save in a run is
+            // the same account, so each concurrent group writes the same value
+            // and last-write-wins is not a race; the type guards keep a
+            // misbehaving server from putting a non-string on the wire.
+            if (typeof saved.page_url === 'string' && saved.page_url) batchPageUrl = saved.page_url
+            if (typeof saved.page_live === 'boolean') batchPageLive = saved.page_live
+          } else {
+            // The save error was dropped entirely. A group refused by the Stage 1
+            // gate — the common case when photos arrive too degraded to identify —
+            // came back as bare `generated_but_not_saved`, which reads like a
+            // transient hiccup. The agent had nothing to tell the seller and no way
+            // to know that retrying identical photos cannot work, or that supplying
+            // photo_identifications is what fixes it.
+            saveError = saveResult.error ?? 'Save failed for an unknown reason.'
           }
+
+          // A prohibited group is refused permanently — flag it so the agent (and
+          // the batch summary) can tell it apart from a transient miss and never
+          // suggests retrying identical photos.
+          const prohibited = isProhibitedRefusal(saveError ?? undefined)
 
           return {
             group_label: group.label,
@@ -437,12 +700,21 @@ export function registerSellerTools(
             confidence: group.confidence,
             is_bundle: isBundle,
             item_id: itemId,
+            // Explicit null, like create_listing: an omitted key cannot be told
+            // apart from an older server that never sent one.
+            public_url: savedPublicUrl ?? null,
             listing,
             price_research: finalPricing,
             bundle_price: bundlePricing,
             qa,
             inactive: savedInactive,
             ...(savedAdvisory ? { pricing_advisory: savedAdvisory } : {}),
+            // Same reason as create_listing: staged and over-limit both save as
+            // inactive for opposite reasons, and the tier copy is wrong for a
+            // listing nothing but the seller is blocking.
+            ...(savedNeedsApproval ? { needs_seller_approval: true } : {}),
+            ...(saveError ? { error: saveError } : {}),
+            ...(prohibited ? { prohibited: true, retryable: false } : {}),
             status: itemId
               ? (savedInactive ? 'saved_inactive' : 'saved')
               : 'generated_but_not_saved',
@@ -459,6 +731,7 @@ export function registerSellerTools(
             photo_count: 0,
             confidence: 'low',
             item_id: null,
+            public_url: null,
             listing: null,
             price_research: null,
             qa: null,
@@ -478,22 +751,46 @@ export function registerSellerTools(
     ).length
     const inactiveCount = items.filter((i) => i.status === 'saved_inactive').length
     const failedCount = items.filter((i) => i.status === 'failed').length
+    // A prohibited group is refused permanently (status 'generated_but_not_saved',
+    // so it counts as neither saved nor failed). Surface it in the headline the
+    // agent relays — otherwise a rejected weapon vanishes from "N saved, M failed".
+    const prohibitedCount = items.filter((i) => i.prohibited === true).length
+
+    // How many of the saved items a buyer can actually open right now. The
+    // count comes from the links the ROUTE issued, not from the status strings
+    // above, so it cannot drift from what the seller would see if they clicked.
+    const liveCount = items.filter((i) => typeof i.public_url === 'string' && i.public_url).length
 
     const summary = `Processed ${groups.length} items: ${savedCount} saved, ${failedCount} failed`
+    const liveNote = liveCount > 0
+      ? ` ${liveCount} of them are LIVE now — show the seller the list with each public_url and ask whether they want any changes.`
+      // Saved but nothing reachable, and the page itself is the reason. Without
+      // this the agent reports "5 saved, 0 failed" beside a page_url that opens
+      // "This sale has ended", and has nothing to explain the gap.
+      : savedCount > 0 && batchPageLive === false
+        ? ' NONE of them are publicly visible: the seller has no live sale page (unpublished, expired or taken down). Use publish_page, or extend_sale_page if it lapsed, before telling them buyers can see anything.'
+        : ''
     const inactiveNote = inactiveCount > 0
       ? ` WARNING: ${inactiveCount} of the saved items are INACTIVE (over the seller's active-item limit) and are NOT visible on the sale page. Check check_tier_status, then free slots or raise the limit and set them to available with edit_listing.`
+      : ''
+    const prohibitedNote = prohibitedCount > 0
+      ? ` NOTE: ${prohibitedCount} item(s) could NOT be listed because they are prohibited (for example weapons, hazardous materials, or other restricted goods). This is permanent — do not retry them, and tell the seller they can't be sold here.`
       : ''
 
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
-          message: summary + inactiveNote,
+          message: summary + liveNote + inactiveNote + prohibitedNote,
           total_photos: photos.length,
           total_items: groups.length,
           saved_count: savedCount,
           inactive_count: inactiveCount,
+          live_count: liveCount,
           failed_count: failedCount,
+          ...(prohibitedCount > 0 ? { prohibited_count: prohibitedCount } : {}),
+          page_url: batchPageUrl,
+          ...(batchPageLive !== undefined ? { page_live: batchPageLive } : {}),
           items,
         }, null, 2),
       }],
@@ -780,6 +1077,21 @@ export function registerSellerTools(
       custom_url_applied?: boolean
       custom_url_reason?: string
       custom_url_message?: string
+      // The roster the publish just put live, so the agent can show the seller
+      // their sale item by item instead of handing over one page link and
+      // following up with get_listings. Optional because a server that predates
+      // this field sends neither — see the null-vs-absent note below.
+      items?: Array<{
+        item_id: string
+        title: string
+        /** Null when the stored price is unreadable — NOT the same as free. */
+        price: number | null
+        status: string
+        public_url: string | null
+      }>
+      page_live?: boolean
+      /** Non-fatal problems with THIS response, e.g. `roster_failed`. */
+      _warnings?: string[]
     }>('/api/pages/publish', {
       ...args,
       publish: true,
@@ -798,12 +1110,40 @@ export function registerSellerTools(
     // happened. The flags are forwarded verbatim (CLAUDE.md rule: the route
     // owns the field names) so a structured reader never depends on prose.
     const data = result.data
-    let message = 'Sale page published!'
+    // The headline has to be able to carry bad news. Leading with "published!"
+    // and appending a "not live" warning produces one message that contradicts
+    // itself, and an agent relays the opening clause.
+    let message = data?.page_live === false
+      ? 'Sale page saved, but it is NOT live.'
+      : 'Sale page published!'
     if (data?.payment_instructions_applied === false) {
       message += ' Payment instructions were NOT changed — relay payment_instructions_message to the seller.'
     }
     if (data?.custom_url_applied === false) {
       message += ' The requested custom URL was NOT applied — relay custom_url_message to the seller.'
+    }
+    // Count from the links themselves, not from `items.length`. The reachable
+    // case is a republish onto a LAPSED page: the route does not refresh
+    // page_expires_at, so the publish succeeds, `page_live` comes back false and
+    // every URL is null. Counting rows there would announce "12 listings are
+    // live" about a page that 404s.
+    const liveItems = (data?.items ?? []).filter((i) => !!i.public_url)
+    if (liveItems.length > 0) {
+      message += ` ${liveItems.length} listing(s) are live — show the seller the list with each public_url and ask whether they want any changes.`
+    }
+    // The publish committed and the page is STILL not reachable. Reachable via
+    // republishing a lapsed page: this route does not refresh page_expires_at,
+    // so the write succeeds and the page stays expired. Saying only "published!"
+    // here is the exact bug `publish: true` was added to fix, through a
+    // different door — a working-looking URL for a page that 404s.
+    if (data?.page_live === false) {
+      message += ' It is expired or was taken down, so buyers cannot see it. Do NOT give the seller this URL as a working link; use extend_sale_page for a lapsed page.'
+    }
+    // An empty roster after a successful publish is ambiguous, and the route
+    // says which it is. Reporting "no listings" to a seller who has forty is
+    // how they end up re-uploading everything.
+    if (data?._warnings?.includes('roster_failed')) {
+      message += ' NOTE: the item list could not be read for this response — that is a lookup failure on our side, NOT an empty sale. Do not tell the seller they have no listings; call get_listings instead.'
     }
 
     return {
@@ -813,6 +1153,12 @@ export function registerSellerTools(
           message,
           url: data?.url,
           slug: data?.slug,
+          // Verbatim, including each item's null URL. Filtering the roster down
+          // to live items would hide exactly the ones the seller needs to hear
+          // about, so the shape stays complete and the message does the summary.
+          ...(data?.items !== undefined ? { items: data.items } : {}),
+          ...(data?.page_live !== undefined ? { page_live: data.page_live } : {}),
+          ...(data?._warnings?.length ? { _warnings: data._warnings } : {}),
           ...(data?.payment_instructions_applied !== undefined
             ? {
                 payment_instructions_applied: data.payment_instructions_applied,
@@ -943,6 +1289,10 @@ export function registerSellerTools(
     title: 'Get Listings',
     description:
       'Get all items for the seller. Returns each item\'s title, price, status, dimensions, queue count, and photos. ' +
+      'Use this to show the seller their listings: every item that is live carries a public_url a buyer can open, and ' +
+      'null means that listing is not publicly visible right now. EXCEPTION: if _warnings contains "page_context_failed", ' +
+      'the seller\'s page settings could not be read, so EVERY public_url is null for that reason alone — do not tell them ' +
+      'their listings are offline, say the check failed and try again. ' +
       'Deleted items are hidden by default. Pass include_deleted: true to also get items awaiting purge, which come back ' +
       'with status "deleted", their deleted_at timestamp, and how much of the 7-day restore window is left. That is the ' +
       'only way to find an item_id for restore_listing once you no longer have it.',
@@ -980,11 +1330,31 @@ export function registerSellerTools(
 
     const items = (result.data as Array<Record<string, unknown>>) || []
 
+    // Page context travels as a SIBLING of `data`, not inside it — it describes
+    // the seller's page, not any one item — and `request()` parses the whole
+    // body into the response object, so it arrives here intact.
+    //
+    // `_warnings` is forwarded for the same reason the identity block uses
+    // explicit nulls: without it, "the page-context read failed" and "this
+    // seller has no page" are the same all-null response, and an agent would
+    // tell the seller their sale is offline during what is really our outage.
+    const envelope = result as typeof result & {
+      page_url?: string | null
+      page_live?: boolean
+      _warnings?: string[]
+    }
+    const pageUrl = envelope.page_url ?? null
+    const pageLive = envelope.page_live
+    const warnings = envelope._warnings
+
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
           total: items.length,
+          page_url: pageUrl,
+          ...(pageLive !== undefined ? { page_live: pageLive } : {}),
+          ...(Array.isArray(warnings) && warnings.length > 0 ? { _warnings: warnings } : {}),
           items: items.map((item) => ({
             item_id: item.item_id,
             title: item.title,
@@ -1001,6 +1371,11 @@ export function registerSellerTools(
             // First photo URL so UI-rendering hosts (MCP Apps) can show a
             // thumbnail. Additive — agents that only read counts are unaffected.
             photo_url: (item.photos as string[] || [])[0] ?? null,
+            // The buyer-facing link for this listing, or null when opening it
+            // would 404 (page not live, or the item is not publicly visible).
+            // Issued by the route; this mapper only has to opt it in, because
+            // the projection is an allowlist and drops anything unnamed.
+            public_url: item.public_url ?? null,
             // Tombstone context, forwarded verbatim for deleted items only.
             //
             // Copied by key prefix rather than mapped field by field because the
