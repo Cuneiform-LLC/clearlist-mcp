@@ -1,5 +1,5 @@
 /** get_listings renderer — item gallery with photo, price, status. */
-import { esc, formatPrice, statusBadge } from './shared'
+import { esc, formatPrice, statusBadge, safeHttpsUrl } from './shared'
 
 interface Listing {
   item_id?: string
@@ -25,8 +25,12 @@ export function renderListings(data: ListingsPayload): string {
   }
   const cards = data.items
     .map((item) => {
-      const photo = item.photo_url
-        ? `<img src="${esc(item.photo_url)}" alt="" loading="lazy">`
+      // https-only, same policy as the links in publish.ts: `esc()` cannot
+      // neutralise a scheme, and photo_url is whatever the configured API
+      // returned.
+      const photoSrc = safeHttpsUrl(item.photo_url)
+      const photo = photoSrc
+        ? `<img src="${esc(photoSrc)}" alt="" loading="lazy">`
         : '<div class="ph"></div>'
       const queue = item.queue_count
         ? `<span class="queue">${esc(item.queue_count)} in queue</span>`

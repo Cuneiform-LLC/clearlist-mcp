@@ -48,6 +48,7 @@ import { registerOnboardingTools } from './onboarding-tools.js'
 import { registerSellerTools } from './seller-tools.js'
 import { registerDiscoveryTools } from './discovery-tools.js'
 import { registerUiResources } from './ui/register.js'
+import { SERVER_INSTRUCTIONS } from './instructions.js'
 
 // ── Configuration ────────────────────────────────────────────────────────────
 const API_URL = process.env.CLEARLIST_API_URL || 'https://clearlist.me'
@@ -77,7 +78,7 @@ const api = new ClearListApiClient({
 /** Single source of truth for this file — the constructor and the startup log
  *  both read it, so they cannot drift apart. Keep in lockstep with the other
  *  version locations listed in PUBLISHING.md. */
-const SERVER_VERSION = '0.9.4'
+const SERVER_VERSION = '0.9.11'
 
 const server = new McpServer(
   {
@@ -96,6 +97,11 @@ const server = new McpServer(
     capabilities: {
       tools: {},
     },
+    // The five cross-cutting rules, surfaced to the model before any tool is
+    // called. Extracted to its own module so a test can reach it: index.ts runs
+    // main() on import, so a value defined here is unreachable from a test
+    // without starting a server — and a value nothing tests is one that drifts.
+    instructions: SERVER_INSTRUCTIONS,
   },
 )
 
@@ -132,7 +138,10 @@ async function main() {
     console.error(`  Auth: None yet`)
     console.error(`  Mode: Onboarding — use send_verification_code + verify_code to authenticate`)
   }
-  console.error(`  Tools: 25 (2 onboarding + 20 seller + 3 discovery)`)
+  // Count the registerTool calls before editing this — it said 25 while the
+  // real number was 26 for the whole life of create_upload_session. stderr
+  // only, so cosmetic, but it is the same drift the lockstep test exists for.
+  console.error(`  Tools: 28 (2 onboarding + 23 seller + 3 discovery)`)
   console.error(`  Ready.`)
 }
 

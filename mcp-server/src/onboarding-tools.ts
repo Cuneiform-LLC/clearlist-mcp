@@ -28,7 +28,12 @@ export function registerOnboardingTools(
   server.registerTool('send_verification_code', {
     title: 'Send Verification Code',
     description:
-      'Send a 6-digit verification code to an email address. This is the first step to create a ClearList account or sign in. The user will receive the code in their inbox. Ask them to tell you the code, then use verify_code to complete authentication. No API key needed for this step.',
+      // verify_code documents its retry limits; this one never mentioned that
+      // sending a second code silently kills the first. An agent that re-sent
+      // "to be safe" while the user was reading the first email put them into a
+      // loop of typing codes that no longer worked.
+      'Send a 6-digit verification code to an email address. This is the first step to create a ClearList account or sign in. The user will receive the code in their inbox. Ask them to tell you the code, then use verify_code to complete authentication. No API key needed for this step. ' +
+      'Send ONE code and wait for the user to read it. Sending another invalidates the previous one, so a second send while they are fetching the first makes the code they are holding fail. Only re-send if they say they never received it or the code has expired (10 minutes).',
     inputSchema: {
       email: z
         .string()
@@ -227,7 +232,13 @@ export function registerOnboardingTools(
             'get_listings — See all items',
             'get_reservations — See buyer reservations and messages',
             'reply_to_buyer — Send a message to a buyer',
-            'mark_picked_up — Mark item as sold',
+            // Named alongside confirm_pickup on purpose. This list is the FIRST
+            // tool guidance a freshly-onboarded agent sees, and "mark item as
+            // sold" alone sent it into the reserved-item refusal on the common
+            // case — the registered description says one thing and onboarding
+            // said another.
+            'mark_picked_up — Mark an item sold when no reservation holds it (walk-up sale)',
+            'confirm_pickup — Close out a reservation the buyer collected, or mark a no-show',
             'set_availability — Configure pickup scheduling',
             'check_tier_status — Check remaining item slots and plan details',
             'generate_payment_link — Get a payment link to upgrade the plan',

@@ -238,9 +238,20 @@ export class ClearListApiClient {
     return this.request<T>(url.toString(), { method: 'GET' }, opts)
   }
 
+  /**
+   * @param idempotencyKey Overrides the per-call random key with a DETERMINISTIC
+   *   one, for a write whose identity is defined by its subject rather than by
+   *   the attempt. A random key makes every tool invocation a distinct write, so
+   *   `withIdempotency` can never replay across invocations and can never
+   *   collapse two concurrent ones — which is right for "create a listing" and
+   *   wrong for "redeem THIS upload session", where a second call must not
+   *   produce a second set of listings from one set of photos.
+   *   Pass a value derived from the subject, never from the attempt.
+   */
   async post<T = unknown>(
     path: string,
     body?: Record<string, unknown>,
+    idempotencyKey?: string,
   ): Promise<ApiResponse<T>> {
     const resolved = this.resolveUrl(path)
     if ('error' in resolved) return { success: false, error: resolved.error }
@@ -253,7 +264,7 @@ export class ClearListApiClient {
         // loop — request() copies init.headers into its header map before the
         // loop starts, so every attempt reuses this exact key. That is the
         // whole point: a retried write must be recognisable as the SAME write.
-        'Idempotency-Key': randomUUID(),
+        'Idempotency-Key': idempotencyKey ?? randomUUID(),
       },
       body: JSON.stringify(body ?? {}),
     })

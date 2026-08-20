@@ -45,6 +45,16 @@ const BASE_CSS = `
   .items{font-size:12px;color:#4B5563;margin-top:3px}
   .last{font-size:12px;color:#9CA3AF;font-style:italic;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .pickup{font-size:12px;color:#166534;margin-top:3px}
+  .upload-session{padding:18px 20px;text-align:left}
+  .us-title{font-size:15px;font-weight:600;margin-bottom:12px}
+  .us-qr{background:#fff;border:1px solid #E5E7EB;padding:10px;display:inline-block;line-height:0}
+  .us-sub{font-size:13px;color:#4B5563;margin-top:12px;max-width:340px}
+  .us-meta{display:flex;flex-direction:column;gap:2px;font-size:12px;color:#9CA3AF;margin-top:10px}
+  .us-fallback{margin-top:12px;font-size:12px;color:#6B7280}
+  .us-fallback summary{cursor:pointer}
+  .us-fallback a{display:block;margin-top:6px;color:#2563EB;word-break:break-all}
+  .us-unverified{margin-top:10px;font-size:12px;color:#A16207}
+  .us-rawurl{display:block;margin-top:6px;font-size:12px;color:#4B5563;word-break:break-all;background:#F3F4F6;padding:6px 8px}
 `
 
 // One combined view: the ext-apps runtime (~400KB incl. protocol schema)
