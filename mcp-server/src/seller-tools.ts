@@ -973,6 +973,22 @@ export function registerSellerTools(
       title: z.string().optional().describe('New title'),
       description: z.string().optional().describe('New description'),
       price: z.number().optional().describe('New price in dollars (0 for free)'),
+      // Declared here or it never reaches the route: zod STRIPS unknown keys,
+      // so an undeclared field silently vanishes from the request (see
+      // set_availability's scheduling_timezone in CLAUDE.md).
+      final_price: z
+        .number()
+        .nullable()
+        .optional()
+        .describe(
+          'What the item actually sold for, if different from the asking price. ' +
+          'Set automatically to the asking price when an item is marked as taken, ' +
+          'unless a value was already recorded — an earlier edit survives the flip. ' +
+          'Edit it to record the real agreed price. null clears it. ' +
+          'Changing status away from taken (relisting or deactivating) CLEARS it ' +
+          'server-side, because that sale did not happen — record the price again ' +
+          'after a re-sale. Read it back with get_listings.',
+        ),
       condition: z
         .enum(['Like New', 'Good', 'Fair', 'Used'])
         .optional()
@@ -1707,6 +1723,29 @@ export function registerSellerTools(
             // Issued by the route; this mapper only has to opt it in, because
             // the projection is an allowlist and drops anything unnamed.
             public_url: item.public_url ?? null,
+            // The resale pair: what it sold for, and when.
+            //
+            // Opted in because without them this dataset is write-only over
+            // MCP — `edit_listing` sets `final_price` and the flip to 'taken'
+            // defaults it, but no tool could read either back, so an agent
+            // could not answer "what did this sell for?" and could not verify
+            // the default that `edit_listing`'s own description promises.
+            //
+            // GATED ON 'taken', because `taken_at` deliberately survives a
+            // relist. It is not cleared on taken → available (the next flip
+            // overwrites it), so an item sitting at 'available' can still carry
+            // the timestamp of a PREVIOUS sale. Forwarding that unconditionally
+            // lets an agent tell a seller their currently-listed item sold on a
+            // date it did not — the convention in types/item.ts says to read
+            // these only off a taken item, and a projection is where a
+            // convention becomes enforcement.
+            //
+            // Keys always present, null when not applicable, like the identity
+            // block on get_profile: JSON drops `undefined`, and an agent must be
+            // able to tell "no recorded sale" from "talking to a server that
+            // predates the field".
+            final_price: item.status === 'taken' ? (item.final_price ?? null) : null,
+            taken_at: item.status === 'taken' ? (item.taken_at ?? null) : null,
             // Tombstone context, forwarded verbatim for deleted items only.
             //
             // Copied by key prefix rather than mapped field by field because the
