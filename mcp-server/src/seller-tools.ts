@@ -10,6 +10,12 @@
 
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+// TYPE-ONLY, deliberately. This file is compiled both by tsc (for the npm
+// package, where a relative specifier must carry `.js`) and by Turbopack (for
+// src/app/api/mcp/route.ts, which cannot resolve `./api-client.js` to a `.ts`
+// source). A type import is erased before either resolver runs; a VALUE import
+// breaks the root `next build`. Same constraint mcp-server/CLAUDE.md records
+// for src/ui/register.ts. Reach runtime helpers through `api`, not an import.
 import type { ClearListApiClient } from './api-client.js'
 
 /**
@@ -262,6 +268,17 @@ export function registerSellerTools(
       destructiveHint: false,
     },
   }, async ({ photos, description, item_identification, voice_transcription }) => {
+    // Refuse an oversized batch before building the request: Cloud Run kills a
+    // >32MiB body at the infrastructure, so the route never gets to explain
+    // itself. See inlinePhotoPayloadError.
+    const oversized = api.inlinePhotoPayloadError(photos)
+    if (oversized) {
+      return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: 'PHOTOS_TOO_LARGE', message: oversized, retryable: false }, null, 2) }],
+        isError: true,
+      }
+    }
+
     // Step 1: Upload photos to Firebase Storage
     const uploadResult = await api.post<{
       fullUrls: string[]
@@ -491,10 +508,9 @@ export function registerSellerTools(
         .optional()
         .describe(
           'Base64-encoded photos (1-50). Can be a mix of items — AI will group them automatically. ' +
-          'Only usable if your runtime can read the actual image bytes. The real ceiling here is about 11 ' +
-          'photos, not 50: the request body cannot exceed roughly 3MB at a resolution the vision model can ' +
-          'work with. For anything larger, or if you cannot access the files at all, use ' +
-          'create_upload_session and pass session_id instead.',
+          'Only usable if your runtime can read the actual image bytes. At JPEG ~85% quality with longest ' +
+          'edge ~2000px, all 50 photos fit in one request (limit is ~24MB of base64). For larger originals, ' +
+          'or if you cannot access the files at all, use create_upload_session and pass session_id instead.',
         ),
       session_id: z
         .string()
@@ -576,6 +592,19 @@ export function registerSellerTools(
           }, null, 2),
         }],
         isError: true,
+      }
+    }
+
+    // Oversized-batch guard, inline path only. A session carries no photo bytes
+    // (they are already in Storage), so it is exempt — and it is also the
+    // remedy this error points at, which would be circular to block.
+    if (!session_id && photos) {
+      const oversized = api.inlinePhotoPayloadError(photos)
+      if (oversized) {
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify({ error: 'PHOTOS_TOO_LARGE', message: oversized, retryable: false }, null, 2) }],
+          isError: true,
+        }
       }
     }
 
@@ -2015,12 +2044,33 @@ export function registerSellerTools(
       }
     }
 
+    // A `pickup_confirmed` send is a CLOSE-OUT, and it can decline to finish.
+    //
+    // The route reports that now — it may sell nothing (every item held by a
+    // buyer ahead of this one) or sell some and fail others. This tool used to
+    // answer 'Message sent successfully' unconditionally, which was true about
+    // the message and wrong about the sale, so an agent closing out a
+    // reservation was told it worked no matter what happened to the items.
+    //
+    // Forwarded rather than reworded: the route owns these words.
+    const d = (result.data ?? {}) as Record<string, unknown>
+    const closedOut = typeof d.pickup_outcome === 'string'
+
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
           message: 'Message sent successfully',
           conversation_id,
+          ...(closedOut
+            ? {
+                pickup_outcome: d.pickup_outcome,
+                pickup_sold_count: d.pickup_sold_count,
+                pickup_not_held_count: d.pickup_not_held_count,
+                reservation_completed: d.reservation_completed,
+                retryable: d.pickup_retryable,
+              }
+            : {}),
         }, null, 2),
       }],
     }
@@ -2787,6 +2837,12 @@ export function registerSellerTools(
       status?: string
       item_count?: number
       skipped_count?: number
+      // How many of the basket this reservation actually sold, and how many it
+      // was refused because a buyer ahead of it holds them. Declared here or
+      // they never reach the agent: this type is the projection, and a field
+      // missing from it is dropped exactly like an undeclared zod key.
+      sold_count?: number
+      not_held_count?: number
       retryable?: boolean
       errored_count?: number
       // Emitted by the noshow branch only: how many queued buyers moved up a
@@ -2877,17 +2933,84 @@ export function registerSellerTools(
     }
 
     const skipped = data.skipped_count ?? 0
+    const notHeld = data.not_held_count ?? 0
+    /** null when the server predates the field — distinct from a real 0. */
+    const soldCount = typeof data.sold_count === 'number' ? data.sold_count : null
+
+    // Nothing was sold, because every item belongs to a buyer ahead of this one.
+    //
+    // Reported before the success shape below, and never as 'confirmed'. The
+    // reservation is deliberately still ACTIVE in this case, so telling the
+    // agent the pickup completed would have it tell the seller their items are
+    // sold when the route wrote nothing — the precise situation the guard
+    // exists to prevent, inverted into a false report. Falling through to the
+    // default branch also produced "they were deleted or already gone", which
+    // is the wrong remedy: the items exist and another buyer is entitled to
+    // them.
+    if (data.outcome === 'nothing_held') {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            message:
+              `Nothing was marked sold. All ${notHeld} item(s) in this reservation are currently held by a buyer ` +
+              'ahead of this one in the queue, so they are not this buyer\'s to collect. The reservation is still ' +
+              'open — tell the seller, and do not report this as a completed pickup.',
+            reservation_id,
+            outcome: 'nothing_held',
+            item_count: data.item_count ?? null,
+            sold_count: 0,
+            not_held_count: notHeld,
+            reservation_still_open: true,
+          }, null, 2),
+        }],
+      }
+    }
+
     return {
       content: [{
         type: 'text' as const,
         text: JSON.stringify({
-          message: skipped > 0
-            ? `Pickup confirmed, but ${skipped} item(s) could not be marked sold — they were deleted or already gone.`
-            : 'Pickup confirmed — items marked as sold',
+          // Two different reasons an item can be skipped, and they need
+          // different sentences: "deleted or already gone" is right for a
+          // tombstone and wrong for an item another buyer holds — that one is
+          // still for sale, to someone else, and the seller's next move differs.
+          //
+          // Both clauses are built and joined rather than chosen between. A
+          // basket can contain both kinds, and an either/or reported only the
+          // not-held ones, silently dropping the deleted ones from a message
+          // whose whole job is to account for what did not sell.
+          message: [
+            // "Pickup confirmed for 0 item(s)" is a contradiction, and it is
+            // reachable: an all-tombstoned basket completes the reservation
+            // (there is genuinely nothing left to collect) with sold_count 0.
+            // A count is only worth stating when there is one to state.
+            //
+            // `sold_count` is checked for its TYPE, not for truthiness — 0 is
+            // the value that matters here — and a server that predates the
+            // field gives null, where claiming any number would be a guess.
+            soldCount === 0
+              ? 'Pickup closed — nothing was marked sold.'
+              : skipped > 0
+                ? soldCount !== null
+                  ? `Pickup confirmed for ${soldCount} item(s).`
+                  : 'Pickup confirmed, but not everything could be marked sold.'
+                : 'Pickup confirmed — items marked as sold',
+            notHeld > 0
+              ? `${notHeld} item(s) are held by a buyer ahead of this one in the queue and were left alone.`
+              : '',
+            skipped > notHeld
+              ? `${skipped - notHeld} item(s) could not be marked sold — they were deleted or already gone.`
+              : '',
+          ]
+            .filter(Boolean)
+            .join(' '),
           reservation_id,
           outcome: 'confirmed',
           item_count: data.item_count ?? null,
+          sold_count: data.sold_count ?? null,
           skipped_count: skipped,
+          not_held_count: notHeld,
         }, null, 2),
       }],
     }

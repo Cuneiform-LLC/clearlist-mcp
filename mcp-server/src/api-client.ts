@@ -72,12 +72,118 @@ const RETRYABLE_STATUS_CODES = new Set([429, 500, 503])
  */
 
 /**
+ * Actionable guidance for a request the platform refused because the BODY was too
+ * big, before any route code ran.
+ *
+ * This is the first wall an assistant hits when it does the obvious, useful thing:
+ * read a folder of phone photos and send them. A raw phone photo is 3-12MB and
+ * base64 adds a third on top, so two of them can exceed the serverless body limit
+ * while the tool description happily says "up to 50 photos". The web app never
+ * hits this because the browser compresses to 2000px before uploading; nothing
+ * compresses on the agent path.
+ *
+ * A bare "HTTP 413" leaves the assistant to guess. Observed in the wild: ChatGPT
+ * guessed correctly, compressed locally and retried, which worked but burned a
+ * round trip and only because it happened to have image tooling. Telling it what
+ * to do makes that the normal path rather than a lucky one.
+ *
+ * ORDER MATTERS, and it changed when M5 shipped. This text originally led with
+ * "shrink and retry", which was the only option when it was written. It is now
+ * the SECOND-best one: `create_upload_session` puts the photos on the seller's
+ * phone instead of in the request body, so it has no size ceiling and no
+ * resolution loss — and resolution is not cosmetic here, since a downscaled
+ * photo is what makes the generator write "Miscellaneous Item" for a $175 mixer.
+ * Shrink-and-retry stays in the message because it is the only move for a host
+ * that cannot show the seller a link, but it is offered second on purpose.
+ *
+ * NAME THE DESTINATION TOOL. This message is returned by BOTH `create_listing`
+ * and `bulk_create_listings`, and only the second one accepts `session_id`. It
+ * used to say "you pass the session_id instead of photos" with no tool named, so
+ * an agent that hit the ceiling on `create_listing` and followed the advice
+ * literally would send a parameter that tool does not declare — and zod STRIPS
+ * unknown keys silently, so the correct guess arrives as if no attempt was made
+ * (see "Enums and hardcoded arguments are the same trap as a missing field" in
+ * mcp-server/CLAUDE.md). `create_listing`'s own tool DESCRIPTION already gets
+ * this right; the runtime error did not. Found by the Kilo pass on PR #575.
+ */
+function payloadTooLargeGuidance(): string {
+  return (
+    'Request body too large. The photos were not uploaded and nothing was created, so it is safe to retry. ' +
+    'Best fix: call create_upload_session and give the seller the link it returns. They upload from their phone, ' +
+    'then you pass the returned session_id to bulk_create_listings in place of photos — not to create_listing, ' +
+    'which has no session_id parameter. That path has no size limit and no quality loss. ' +
+    'If you cannot show the seller a link, shrink and resend instead: resize so the longest edge is about 2000px, ' +
+    're-encode as JPEG at ~85% quality, and keep each request under about 24MB of base64 in total. ' +
+    'At that resolution and quality, all 50 photos fit comfortably in one request. ' +
+    'You may also list as many items as the plan allows across several calls.'
+  )
+}
+
+/**
  * Truncate a non-JSON response body to a single line of bounded length.
  * HTML error pages can be many KB; we just want a hint, not the full DOM.
  */
 function truncateBody(body: string): string {
   const oneLine = body.replace(/\s+/g, ' ').trim()
   return oneLine.length > 200 ? `${oneLine.slice(0, 197)}...` : oneLine
+}
+
+/**
+ * Absolute ceiling on an inline base64 photo batch, checked BEFORE the request
+ * is built. Mirrors `MAX_INLINE_REQUEST_BYTES` in
+ * `src/app/api/items/bulk-upload/route.ts` (duplicated, not imported: this
+ * package publishes standalone to npm and cannot reach into the Next app).
+ *
+ * **This is a floor under the failure mode, NOT the practical limit.** Vercel
+ * caps a request body at 4.5MB and Cloud Run at 32MiB, so on today's platform
+ * the real ceiling is roughly 3-4MB of base64 — which is what
+ * `payloadTooLargeGuidance()` and the tool descriptions tell agents, and they
+ * are right to. Anything reaching 24MB is so far past every platform limit that
+ * it can only be a runtime handing over untouched originals, and the useful
+ * thing is to say so before spending the upload.
+ *
+ * **Why check client-side at all when a 413 is already handled well.** A 413 is
+ * a REACTION: the bytes have already crossed the wire, and on Cloud Run a body
+ * over 32MiB is killed by the infrastructure, so there may be no parseable
+ * response left for `payloadTooLargeGuidance()` to attach to. This is the
+ * proactive half — it fires without sending anything. Raised by the Codex pass
+ * on the Phase 2 plan: "a route-level size gate cannot handle requests rejected
+ * before application code runs. The client must select upload sessions before
+ * constructing an oversized inline request."
+ */
+export const MAX_INLINE_PHOTO_BYTES = 24 * 1024 * 1024
+
+/**
+ * Returns an agent-actionable error string if this batch cannot possibly be
+ * sent inline, or `null` if it is worth attempting.
+ *
+ * Deliberately reuses `payloadTooLargeGuidance()` rather than writing a second
+ * remedy message. The two paths describe the same problem and must not drift —
+ * an agent that hits the proactive check and then the reactive 413 should not
+ * be told two different stories about what to do next.
+ *
+ * Sums raw string lengths: base64 is ASCII, so one character is one wire byte,
+ * and it is the transmitted size that has to clear the platform limit.
+ */
+export function inlinePhotoPayloadError(photos: readonly string[]): string | null {
+  // Buffer.byteLength, not .length: a JS string length counts UTF-16 code
+  // units, so a non-ASCII element undercounts its own wire size and could slip
+  // a body past this guard that the platform then rejects. Base64 is ASCII and
+  // the two agree for well-formed input; this array is agent-supplied, so the
+  // guard must not be foolable by exactly the malformed case it exists to
+  // catch. (Codex adversarial pass on this change.)
+  const totalBytes = photos.reduce(
+    (sum, p) => sum + (typeof p === 'string' ? Buffer.byteLength(p, 'utf8') : 0),
+    0,
+  )
+  if (totalBytes <= MAX_INLINE_PHOTO_BYTES) return null
+
+  const mb = (n: number) => (n / (1024 * 1024)).toFixed(1)
+  return (
+    `These ${photos.length} photos total ${mb(totalBytes)}MB of base64. That is far past what a ` +
+    `single request can carry on any deployment target ClearList runs on, so nothing was sent. ` +
+    `${payloadTooLargeGuidance()}`
+  )
 }
 
 export interface ApiResponse<T = unknown> {
@@ -147,6 +253,30 @@ export class ClearListApiClient {
 
   get stats(): { requestCount: number } {
     return { requestCount: this.requestCount }
+  }
+
+  /**
+   * Instance-side alias for the module function of the same name.
+   *
+   * It exists for a build reason, not a design one. `seller-tools.ts` is
+   * compiled twice: by `tsc` for the npm package (emitted ESM, run directly by
+   * node, so relative specifiers MUST carry `.js`) and by Turbopack for the
+   * Next route at `src/app/api/mcp/route.ts` (which resolves `./api-client.js`
+   * literally and cannot find a file of that name — the source is `.ts`).
+   *
+   * A relative TYPE import survives both, because it is erased before
+   * resolution. A relative VALUE import satisfies only the first, and the root
+   * `next build` fails with "Module not found: Can't resolve './api-client.js'".
+   * `mcp-server/CLAUDE.md` already records the same constraint for
+   * `src/ui/register.ts` ("no relative value imports"); seller-tools.ts is on
+   * the same shared path and inherits it.
+   *
+   * So the guard reaches seller-tools through the client instance it is already
+   * handed, and its only relative import stays type-only. The module function
+   * remains exported for direct callers and tests.
+   */
+  inlinePhotoPayloadError(photos: readonly string[]): string | null {
+    return inlinePhotoPayloadError(photos)
   }
 
   /**
@@ -387,7 +517,10 @@ export class ClearListApiClient {
             return {
               ...json,
               success: false,
-              error: json.error || `HTTP ${response.status}: ${response.statusText}`,
+              error:
+                response.status === 413
+                  ? payloadTooLargeGuidance()
+                  : json.error || `HTTP ${response.status}: ${response.statusText}`,
               http_status: response.status,
             }
           }
@@ -890,7 +1023,10 @@ export class ClearListApiClient {
           return {
             ...json,
             success: false,
-            error: json.error || `HTTP ${response.status}: ${response.statusText}`,
+            error:
+              response.status === 413
+                ? payloadTooLargeGuidance()
+                : json.error || `HTTP ${response.status}: ${response.statusText}`,
             http_status: response.status,
           }
         }
