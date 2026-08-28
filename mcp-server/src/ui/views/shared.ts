@@ -126,8 +126,39 @@ export function mountView<T>(
   const root = document.getElementById('root')
   if (!root) return
 
-  const app = new App({ name, version: '0.9.18' })
+  const app = new App({ name, version: '0.9.19' })
   let current: T | null = null
+
+  /**
+   * Follow the host's light/dark setting.
+   *
+   * These views paint their own surfaces, so without this a card is a glaring
+   * white slab in a dark client. `prefers-color-scheme` is NOT a substitute:
+   * the sandbox resolves that against the OS, so a seller running a dark app on
+   * a light OS still gets the wrong one — the host's own `theme` is the only
+   * accurate signal.
+   *
+   * BOTH attribute names are set, on purpose:
+   *  - `data-theme` is what the SDK's own `applyDocumentTheme`/`getDocumentTheme`
+   *    use (ext-apps styles.d.ts). Anything that later reaches for those helpers
+   *    reads this one, so omitting it would leave the two disagreeing.
+   *  - `data-mode` is what claude.ai's sandbox proxy reads to decide a view is
+   *    theme-managed — its print handler swaps it to "light" and restores it.
+   *    Observed in the proxy script 2026-08-27; if that behaviour changes this
+   *    attribute becomes redundant rather than wrong.
+   * BASE_CSS keys off `data-mode`; keep the two in sync or the CSS stops
+   * matching.
+   */
+  const applyTheme = (theme: unknown): void => {
+    if (theme !== 'light' && theme !== 'dark') return
+    document.documentElement.setAttribute('data-mode', theme)
+    document.documentElement.setAttribute('data-theme', theme)
+    document.documentElement.style.colorScheme = theme
+  }
+
+  // The notification carries a DIFF, so an absent theme means "unchanged", not
+  // "back to default" — applyTheme ignores anything that is not a real value.
+  app.onhostcontextchanged = (params) => applyTheme(params?.theme)
 
   app.ontoolresult = (params: ToolResultParams) => {
     if (params.isError) {
@@ -182,7 +213,20 @@ export function mountView<T>(
     })
   }
 
-  app.connect().catch(() => {
-    root.innerHTML = '<div class="error">Could not connect to the host.</div>'
-  })
+  // Two-argument `then`, NOT `.then(...).catch(...)`. In the chained form a
+  // throw from applyTheme lands in the connection handler, which would wipe the
+  // seller's already-painted listings and replace them with a connection error
+  // for a connection that succeeded. Here the rejection handler sees only
+  // connect()'s own failure, and a theme fault surfaces as an unhandled
+  // rejection in devtools — loud where a developer can see it, harmless where
+  // the seller can. Do NOT "fix" that by wrapping applyTheme in an empty catch;
+  // that trades a misleading message for a silent one.
+  app.connect().then(
+    () => {
+      applyTheme(app.getHostContext()?.theme)
+    },
+    () => {
+      root.innerHTML = '<div class="error">Could not connect to the host.</div>'
+    },
+  )
 }

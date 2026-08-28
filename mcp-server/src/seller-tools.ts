@@ -1744,8 +1744,12 @@ export function registerSellerTools(
             requires_truck: item.requires_truck,
             queue_count: item.queue_count || 0,
             photos: (item.photos as string[] || []).length,
-            // First photo URL so UI-rendering hosts (MCP Apps) can show a
-            // thumbnail. Additive — agents that only read counts are unaffected.
+            // First photo URL. NOTE: our own MCP App view no longer renders it
+            // — views/listings.ts records why claude.ai cannot display a remote
+            // image at all. Kept because it is the only way any other consumer
+            // (a different host, an agent writing a crosspost, a script) reaches
+            // the cover photo without a second call.
+            // Additive — agents that only read counts are unaffected.
             photo_url: (item.photos as string[] || [])[0] ?? null,
             // The buyer-facing link for this listing, or null when opening it
             // would 404 (page not live, or the item is not publicly visible).
