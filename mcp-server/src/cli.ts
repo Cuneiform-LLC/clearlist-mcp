@@ -17,7 +17,7 @@ import { ClearListApiClient, type ApiResponse } from './api-client.js'
 const DEFAULT_API_URL = 'https://clearlist.me'
 const CONFIG_DIR = join(homedir(), '.clearlist')
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json')
-const CLI_VERSION = '0.9.19'
+const CLI_VERSION = '0.9.20'
 
 interface CliConfig {
   apiKey?: string

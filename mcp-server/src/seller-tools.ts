@@ -670,14 +670,26 @@ export function registerSellerTools(
       }
     }
 
-    const { fullUrls, thumbnailUrls, batchId } = uploadResult.data
+    // thumbnailUrls is deliberately NOT destructured. Every consumer below —
+    // grouping, and the photoUrls attached to each created item — wants the full
+    // photo, and pulling the thumbnails into scope is how one of them ended up
+    // being handed to the grouper by mistake.
+    const { fullUrls, batchId } = uploadResult.data
 
     // Step 2: Group photos by item (Agent 1 — uses streaming, handled by postStream)
     const groupResult = await api.postStream<{
       groups: Array<{ photo_indices: number[]; label: string; confidence: string; recognition_type?: string; is_bundle?: boolean; bundle_components?: string[] }>
     }>('/api/items/bulk-group', {
-      thumbnailUrls,
-      totalPhotos: thumbnailUrls.length,
+      // fullUrls, NOT thumbnailUrls. The field name is legacy — bulk-group's own
+      // comment says it "actually receives full-res", and the web flow has always
+      // sent full images here "for dramatically better AI grouping accuracy"
+      // (`items/new/page.tsx`). This path sent thumbnailUrls and got away with it
+      // only because bulk-upload's "thumbnail" was a byte-identical copy of the
+      // full photo. Now that it is a real 512px thumbnail, sending it here would
+      // silently drop every agent-driven grouping to a fraction of the detail the
+      // web flow gets — an AI quality regression no test would have caught.
+      thumbnailUrls: fullUrls,
+      totalPhotos: fullUrls.length,
     })
 
     if (!groupResult.success || !groupResult.data) {

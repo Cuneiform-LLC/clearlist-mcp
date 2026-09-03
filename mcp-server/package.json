@@ -1,6 +1,6 @@
 {
   "name": "@clearlist/mcp-server",
-  "version": "0.9.19",
+  "version": "0.9.20",
   "mcpName": "io.github.Cuneiform-LLC/clearlist",
   "private": false,
   "description": "ClearList MCP Server — AI agent interface to the ClearList API",
