@@ -92,6 +92,12 @@ const BASE_CSS = `
   .us-title{font-size:15px;font-weight:600;margin-bottom:12px}
   .us-qr{background:#fff;border:1px solid var(--line);padding:10px;display:inline-block;line-height:0}
   .us-sub{font-size:13px;color:var(--fg4);margin-top:12px;max-width:340px}
+  /* The "why a QR code" line. --fg2 sits between .us-sub's --fg4 (the loudest,
+     it is the instruction) and .us-meta's --fg3 (the quietest, those are
+     constraints), which is the hierarchy this line wants. NOT --fg3: that made
+     it identical to .us-meta and, on the white QR-panel ground, ~2.56:1 —
+     under WCAG AA for body text a seller actually reads. --fg2 clears it. */
+  .us-why{font-size:12px;line-height:1.45;color:var(--fg2);margin-top:10px;max-width:340px}
   .us-meta{display:flex;flex-direction:column;gap:2px;font-size:12px;color:var(--fg3);margin-top:10px}
   .us-fallback{margin-top:12px;font-size:12px;color:var(--fg2)}
   .us-fallback summary{cursor:pointer}

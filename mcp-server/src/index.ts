@@ -78,7 +78,7 @@ const api = new ClearListApiClient({
 /** Single source of truth for this file — the constructor and the startup log
  *  both read it, so they cannot drift apart. Keep in lockstep with the other
  *  version locations listed in PUBLISHING.md. */
-const SERVER_VERSION = '0.9.20'
+const SERVER_VERSION = '0.9.21'
 
 const server = new McpServer(
   {

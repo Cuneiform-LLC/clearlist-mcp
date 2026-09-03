@@ -190,6 +190,7 @@ export function renderUploadSession(data: UploadSessionPayload): string {
     <div class="us-title">Scan this with your phone</div>
     <div class="us-qr">${qrSvg(url, 190)}</div>
     <div class="us-sub">Photograph everything. Say <b>done</b> here when you have finished and I will build the listings.</div>
+    <div class="us-why">Why your phone? Your assistant can look at a photo without being able to pass us the actual file. Sending straight from your phone gets us one we can read.</div>
     <div class="us-meta">
       ${photos !== null ? `<span>Up to ${photos} ${photos === 1 ? 'photo' : 'photos'}.</span>` : ''}
       <span>${expiryLine(data.expires_at)}</span>
