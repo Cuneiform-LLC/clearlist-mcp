@@ -1,6 +1,6 @@
 # ClearList MCP Server
 
-[![smithery badge](https://smithery.ai/badge/clearlist/clearlist)](https://smithery.ai/servers/clearlist/clearlist)
+[![LightNow capabilities](https://lightnow.ai/badge/io.github.Cuneiform-LLC/clearlist)](https://lightnow.ai/servers/io.github.Cuneiform-LLC/clearlist)
 
 AI agent interface to ClearList, an AI resale manager. Any MCP-compatible agent (Claude, ChatGPT, Gemini, Manus, custom agents) can create listings, publish sale pages, and manage reservations — all through the same API routes the web UI uses.
 
