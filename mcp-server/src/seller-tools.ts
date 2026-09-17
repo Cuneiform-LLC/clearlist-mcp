@@ -225,6 +225,7 @@ export function registerSellerTools(
       // agent told only "use create_upload_session" comes back here and loops.
       'If you cannot send the photo FILES themselves — you can see an image in the chat but your runtime cannot put its bytes in a tool call — use create_upload_session instead, have the seller send photos from their phone, then pass the returned session_id to bulk_create_listings (not to this tool, which has no session_id parameter). A shrunken copy comes back unidentifiable. ' +
       'Always pass item_identification when you can tell what the item is: images often reach ClearList at a lower resolution than the ones you were shown, so your identification may be the only reliable one. ' +
+      'Never put the seller\'s street address in description or item_identification: listing text is public, and a listing containing the stored address is refused at save with code ADDRESS_IN_PUBLIC_LISTING. ' +
       // The example is doing teaching work, so the two fields must be filled the
       // way they are meant to be used: item_identification is what YOU see,
       // description is what the SELLER said. The old example put an identity
@@ -378,12 +379,19 @@ export function registerSellerTools(
       // A prohibited refusal is permanent — do not let the agent read it as a
       // transient save failure and retry, or reassure the seller it will work.
       const prohibited = isProhibitedRefusal(createResult.error)
+      // The seller's street address in public listing text (#553). Not
+      // retryable as-is; the same photos without the address are fine.
+      const code = (createResult as { code?: string }).code
+      const addressInListing = code === 'ADDRESS_IN_PUBLIC_LISTING'
       return {
         content: [{ type: 'text' as const, text: JSON.stringify({
           error: createResult.error || 'Unknown error',
+          ...(code ? { code } : {}),
           message: prohibited
             ? 'This item cannot be listed on ClearList — it is a prohibited item (for example weapons, hazardous materials, or other restricted goods). This is permanent: do NOT retry, and tell the seller it can\'t be sold here.'
-            : 'AI generated the listing but failed to save it',
+            : addressInListing
+              ? 'Not saved: the listing text contains the seller\'s street address, and listings are public. Call create_listing again without the address in description or item_identification.'
+              : 'AI generated the listing but failed to save it',
           ...(prohibited ? { prohibited: true, retryable: false } : {}),
           listing: aiResult,
         }, null, 2) }],
@@ -1008,6 +1016,7 @@ export function registerSellerTools(
       // read them. The route returns four different 409s and only one is worth
       // retrying, which is the whole reason classifyItemWriteFailure exists.
       'On failure, read retryable before trying again — most failures here are permanent and repeat forever. If next_action says restore_listing, the item is deleted and must be restored first. Setting status to "taken" on a reserved item is refused; the error names the right path. ' +
+      'Listing text is public, so an edit whose text contains the seller\'s stored street address is refused with code ADDRESS_IN_PUBLIC_LISTING. Remove the address; to give it to a buyer, use share_address. ' +
       'Example: { item_id: "item_abc", price: 75, description: "Updated description" }',
     inputSchema: {
       item_id: z.string().describe('The item ID to edit'),
@@ -1084,6 +1093,7 @@ export function registerSellerTools(
           // and only one is a real race. See classifyItemWriteFailure — the
           // taxonomy lives there, not in copies of it at each call site.
           ...classifyItemWriteFailure(result),
+          ...((result as { code?: string }).code ? { code: (result as { code?: string }).code } : {}),
           message: 'Failed to update listing',
         }, null, 2) }],
         isError: true,
@@ -1992,8 +2002,12 @@ export function registerSellerTools(
       'NEVER include the home address, street, or unit number of the seller in the message, even if the seller ' +
       'supplied it to you or a buyer asks for it. There is a tool for that and this is not it: use ' +
       'share_address, which shows the seller who it is going to, then confirm_address_share once they agree. ' +
-      'Routing an address through here skips that approval and sends no record to the seller. Arranging a ' +
+      'Routing an address through here skips that approval. Arranging a ' +
       'meeting place is fine; putting the address in a message is not. ' +
+      // What the server enforces since #553, so an assistant can explain a
+      // refusal instead of retrying it. The rule above stays the instruction:
+      // this sentence describes the safety net, not a second way to share.
+      'If a message does contain the seller\'s stored street address anyway, ClearList treats it as an accidental disclosure and decides by recipient: to a buyer who has only sent an enquiry it is not sent (code ADDRESS_NEEDS_RESERVATION, do not retry; the seller can share it from their ClearList inbox); to a buyer with a reservation it is sent, the response says contained_street_address: true, and an email telling the seller is queued. Tell the seller which happened. ' +
       // "always emails" would overstate it — delivery can still fail on missing
       // seller/reservation data. What is reliably true is that a send cannot be
       // taken back, and there is no rate limit on this route, so a retry loop
@@ -2054,8 +2068,18 @@ export function registerSellerTools(
     })
 
     if (!result.success) {
+      // `code` sits at the top level of a failed result (see share_address).
+      // Forwarded so ADDRESS_NEEDS_RESERVATION reads as a refusal to explain,
+      // not a transient failure to retry.
+      const code = (result as { code?: string }).code
       return {
-        content: [{ type: 'text' as const, text: JSON.stringify({ error: result.error || 'Unknown error', message: 'Failed to send message' }, null, 2) }],
+        content: [{ type: 'text' as const, text: JSON.stringify({
+          error: result.error || 'Unknown error',
+          ...(code ? { code } : {}),
+          message: code === 'ADDRESS_NEEDS_RESERVATION'
+            ? 'Not sent: the message contains the seller\'s street address and this buyer has not reserved anything. Do not retry. Tell the seller; they can share it from their ClearList inbox.'
+            : 'Failed to send message',
+        }, null, 2) }],
         isError: true,
       }
     }
@@ -2078,6 +2102,12 @@ export function registerSellerTools(
         text: JSON.stringify({
           message: 'Message sent successfully',
           conversation_id,
+          // The message carried the seller's street address to a reserved
+          // buyer and the seller is being emailed a record (#553). Forwarded so
+          // the agent tells the seller instead of reporting a plain send.
+          ...(d.contained_street_address === true
+            ? { contained_street_address: true, seller_notified: d.seller_notified === true }
+            : {}),
           ...(closedOut
             ? {
                 pickup_outcome: d.pickup_outcome,
