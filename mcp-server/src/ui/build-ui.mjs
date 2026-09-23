@@ -15,6 +15,7 @@ import { build } from 'esbuild'
 import { writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { zodEnglishOnly } from './zod-locales-plugin.mjs'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -106,7 +107,7 @@ const BASE_CSS = `
   .us-rawurl{display:block;margin-top:6px;font-size:12px;color:var(--fg4);word-break:break-all;background:var(--chip);padding:6px 8px}
 `
 
-// One combined view: the ext-apps runtime (~400KB incl. protocol schema)
+// One combined view: the ext-apps runtime (mostly zod, its protocol schema)
 // would be duplicated per view otherwise. views/app.ts dispatches on the
 // tool payload shape.
 const VIEWS = [{ key: 'app', entry: 'views/app.ts', title: 'ClearList' }]
@@ -120,6 +121,7 @@ async function bundleView(entry) {
     target: 'es2020',
     minify: true,
     write: false,
+    plugins: [zodEnglishOnly],
   })
   return result.outputFiles[0].text
 }

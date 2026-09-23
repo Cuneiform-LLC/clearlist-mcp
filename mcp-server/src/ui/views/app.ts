@@ -1,7 +1,7 @@
 /**
  * Single MCP App view shared by get_listings, publish_page, get_reservations,
  * create_upload_session and share_address. One bundle instead of five because
- * the ext-apps runtime (~400KB with the protocol schema) would otherwise be
+ * the ext-apps runtime (mostly zod, its protocol schema) would otherwise be
  * inlined per view.
  *
  * Kept to a shell on purpose. `mountView` touches the DOM and the ext-apps
