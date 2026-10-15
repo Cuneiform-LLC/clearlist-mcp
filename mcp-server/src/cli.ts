@@ -17,7 +17,7 @@ import { ClearListApiClient, type ApiResponse } from './api-client.js'
 const DEFAULT_API_URL = 'https://clearlist.me'
 const CONFIG_DIR = join(homedir(), '.clearlist')
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json')
-const CLI_VERSION = '0.9.24'
+const CLI_VERSION = '0.10.0'
 
 interface CliConfig {
   apiKey?: string
@@ -265,10 +265,25 @@ async function main(): Promise<void> {
       const [conversationId, ...messageParts] = positional
       const message = messageParts.join(' ')
       if (!conversationId || !message) fail('Usage: clearlist reply <conversationId> <message...>')
+      // A key's message needs a confirmation token (the server refuses one
+      // without, CONFIRMATION_REQUIRED). A person typing this command has
+      // already seen and chosen the text, so the CLI prepares and sends in one
+      // go; the agent tools keep the two steps apart so a seller can say yes.
+      const client = makeClient(true)
+      const prepared = await client.post<{ confirmation_token: string; message: string }>(
+        `/api/conversations/${conversationId}/reply/prepare`,
+        { message },
+      )
+      if (!prepared.success) {
+        printResult(prepared)
+        return
+      }
+      if (!prepared.data?.confirmation_token) fail('Prepare returned no confirmation token; nothing was sent.')
       printResult(
-        await makeClient(true).post(`/api/conversations/${conversationId}`, {
-          content: message,
+        await client.post(`/api/conversations/${conversationId}`, {
+          content: prepared.data!.message,
           type: 'text',
+          confirmation_token: prepared.data!.confirmation_token,
         }),
       )
       return
