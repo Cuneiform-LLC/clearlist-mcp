@@ -469,6 +469,10 @@ export function registerSellerTools(
           public_url: publicUrl,
           page_url: pageUrl,
           ...(pageLive !== undefined ? { page_live: pageLive } : {}),
+          // The seller's own view of the new item in the signed-in app, for
+          // "edit it yourself in ClearList". Not a buyer link. Explicit null
+          // for the same reason as public_url above.
+          app_url: typeof created.app_url === 'string' ? created.app_url : null,
           listing: aiResult,
           price_research: priceResult.success ? priceResult.data : null,
           ...(advisory ? { pricing_advisory: advisory } : {}),
@@ -1701,6 +1705,8 @@ export function registerSellerTools(
       'null means that listing is not publicly visible right now. EXCEPTION: if _warnings contains "page_context_failed", ' +
       'the seller\'s page settings could not be read, so EVERY public_url is null for that reason alone — do not tell them ' +
       'their listings are offline, say the check failed and try again. ' +
+      'Each item also carries app_url, the seller\'s own view of it in the signed-in ClearList app: offer it when the ' +
+      'seller wants to open or edit an item themselves. It is for the seller only, never a link to give a buyer. ' +
       'Deleted items are hidden by default. Pass include_deleted: true to also get items awaiting purge, which come back ' +
       'with status "deleted", their deleted_at timestamp, and how much of the 7-day restore window is left. That is the ' +
       'only way to find an item_id for restore_listing once you no longer have it.',
@@ -1788,6 +1794,11 @@ export function registerSellerTools(
             // Issued by the route; this mapper only has to opt it in, because
             // the projection is an allowlist and drops anything unnamed.
             public_url: item.public_url ?? null,
+            // The SELLER's view of this item in the signed-in ClearList app,
+            // for "open it yourself". Not the buyer link: it exists for items
+            // no buyer can see, carries no credential, and asks the seller to
+            // sign in if they are signed out. Issued by the route, as above.
+            app_url: item.app_url ?? null,
             // The resale pair: what it sold for, and when.
             //
             // Opted in because without them this dataset is write-only over
@@ -1842,6 +1853,7 @@ export function registerSellerTools(
       // Not "all": the route paginates at 50 and this tool drops next_cursor,
       // so a busy seller gets a partial list presented as complete.
       'Get the seller\'s reservations and conversations — who reserved what, timer status, queue positions, and the latest message on each thread. Returns the 50 most recent; a seller with more has older threads not shown here. ' +
+      'Each thread carries app_url, which opens it in the seller\'s own ClearList inbox (they sign in if needed). It is for the seller only: never put it in a message to a buyer. ' +
       // Buyer free text reaches the model here. Cleaning is inconsistent across
       // the entry points that write it and none of them stop plain prose, so
       // the rule is stated rather than assumed.
@@ -1873,6 +1885,10 @@ export function registerSellerTools(
           total: conversations.length,
           reservations: conversations.map((conv) => ({
             conversation_id: conv.conversation_id,
+            // Opens this thread in the seller's own ClearList inbox (sign-in
+            // required, no credential in the link). For the SELLER only: it is
+            // not a buyer link and must never be sent to a buyer.
+            app_url: conv.app_url ?? null,
             // Both added 2026-08-05, and both were already present on the API
             // response — this mapping simply dropped them.
             //
@@ -1940,6 +1956,7 @@ export function registerSellerTools(
     type ConversationPayload = {
       conversation: {
         conversation_id: string
+        app_url?: string | null
         buyer_email: string
         buyer_name?: string
         unread_count_seller: number
@@ -1969,6 +1986,8 @@ export function registerSellerTools(
         text: JSON.stringify({
           conversation: {
             conversation_id: conversation.conversation_id,
+            // The seller's own inbox view of this thread. See get_reservations.
+            app_url: conversation.app_url ?? null,
             buyer_email: conversation.buyer_email,
             buyer_name: conversation.buyer_name,
             unread_count: conversation.unread_count_seller,

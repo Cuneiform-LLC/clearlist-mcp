@@ -126,7 +126,7 @@ export function mountView<T>(
   const root = document.getElementById('root')
   if (!root) return
 
-  const app = new App({ name, version: '0.10.1' })
+  const app = new App({ name, version: '0.10.2' })
   let current: T | null = null
 
   /**
